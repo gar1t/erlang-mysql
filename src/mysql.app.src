@@ -1,0 +1,9 @@
+%%% -*-erlang-*-
+{application, mysql,
+ [{description, "MySQL support"},
+  {vsn, "0.0.0"},
+  {modules, []},
+  {registered, []},
+  {applications, [kernel, stdlib, emysql]},
+  {env, []}
+ ]}.
