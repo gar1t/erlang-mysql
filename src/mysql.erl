@@ -5,7 +5,8 @@
 -include("dbapi.hrl").
 
 %% App API
--export([start/0]).
+-export([start/0,
+         get_cfg/1]).
 
 %% DB API
 -include("dbapi_specs.hrl").
@@ -30,6 +31,14 @@ ensure_app_started(App) ->
         {error, {alread_started, App}} -> ok;
         Other -> Other
     end. 
+
+%% ===================================================================
+%% Config
+%% ===================================================================
+
+%% TODO: Hard coded values for now - implement app config
+get_cfg(max_allowed_packet) -> 100 * 1024 * 1024;
+get_cfg(default_character_set) -> 8. %% TODO try 0
 
 %% ===================================================================
 %% Connect

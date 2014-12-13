@@ -10,7 +10,14 @@
 Just get the API defined and working and sane. Use the venerable product of
 time and chance, Emysql.
 
-## Phase 2 - Implement [MySQL wire protocol](http://dev.mysql.com/doc/internals/en/client-server-protocol.html)
+## Phase 2 - Implement
+   [MySQL wire protocol](http://dev.mysql.com/doc/internals/en/client-server-protocol.html)
+
+# MySQL Protocol
+
+- Not handling servers that don't support CLIENT_PROTOCOL_41
+- Deferring SSL support until we have plain working
+- Not supporting CLIENT_CONNECT_ATTRS (what does this buy us?)
 
 # DBAPI
 
