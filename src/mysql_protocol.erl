@@ -1,10 +1,30 @@
+%% mysql_protocol - Support for the MySQL client/server protocol
+%%
+%% This module attempts to implement the protocol defined here:
+%%
+%% http://dev.mysql.com/doc/internals/en/client-server-protocol.html
+%%
 -module(mysql_protocol).
 
--export([test/0, test2/0]).
+%% Network API
+-export([send_packet/3,
+         recv_packet/1]).
+
+%% Packet encoding/decoding
+-export([decode_handshake/1,
+         decode_packet/1,
+         encode_handshake_response/3]).
+
+%% Command packets
+-export([com_quit/0,
+         com_init/1,
+         com_query/1,
+         com_ping/0]).
+
+-include("mysql_internal.hrl").
 
 -record(handshake,
-        {seq,
-         protocol_version,
+        {protocol_version,
          server_version,
          connection_id,
          auth_plugin_data_1,
@@ -21,120 +41,46 @@
          user,
          password}).
 
--record(ok_packet,
-        {seq,
-         affected_rows,
-         last_insert_id,
-         status_flags,
-         warnings,
-         info}).
+%% Capability flags
 
--record(err_packet,
-        {seq,
-         code,
-         sqlstate,
-         msg}).
+-define(CLIENT_PROTOCOL_41,       16#00000200).
+-define(CLIENT_SECURE_CONNECTION, 16#00008000).
 
 %% Generic response headers
 
 -define(OK_HEADER,  16#00).
 -define(ERR_HEADER, 16#ff).
 
-%% Capability flags
+%% Commands
 
--define(CLIENT_PROTOCOL_41,       16#00000200).
--define(CLIENT_SECURE_CONNECTION, 16#00008000).
-
-%% ===================================================================
-%% Our tests
-%% ===================================================================
-
-test() ->
-    User = <<>>,
-    Pwd = <<>>,
-    Sock = connection(),
-    Handshake = handshake(recv_packet(Sock)),
-    HandshakeResponse = handshake_response(Handshake, User, Pwd),
-
-    send_packet(Sock, HandshakeResponse),
-    Last = decode_packet(recv_packet(Sock)),
-    
-    gen_tcp:close(Sock),
-
-    io:format("Handshake: ~p~n", [Handshake]),
-    io:format("HandshakeResponse:~n~s~n",
-              [mysql_debug:hexdump(packet_data(HandshakeResponse))]),
-    io:format("Last Packet: ~p~n", [Last]).
-
-connection() ->
-    Host = "localhost",
-    Port = 3306,
-    Options = [binary, {packet, raw}, {active, false}],
-    Timeout = 1000,
-    {ok, Sock} = gen_tcp:connect(Host, Port, Options, Timeout),
-    Sock.
+-define(COM_QUIT,  16#01).
+-define(COM_INIT,  16#02).
+-define(COM_QUERY, 16#03).
+-define(COM_PING,  16#0e).
 
 %% ===================================================================
-%% Tests with emysql
+%% Network
 %% ===================================================================
 
-test2() ->
-    Connection = connection(),
-    Result = emysql_auth:handshake(Connection, "", ""),
-    gen_tcp:close(Connection),
-    Result.
-
-%% ===================================================================
-%% Helpers
-%% ===================================================================
+send_packet(Sock, Seq, Data) ->
+    Len = iolist_size(Data),
+    mysql_net:send(Sock, [<<Len:24/little, Seq:8>>, Data]).
 
 recv_packet(Sock) ->
-    {ok, <<Len:24/little, Seq:8>>} = gen_tcp:recv(Sock, 4),
-    {ok, Packet} = gen_tcp:recv(Sock, Len),
-    {Seq, Packet}.
+    handle_packet_header_recv(mysql_net:recv(Sock, 4), Sock).
 
-send_packet(Sock, {Seq, Data}) ->
-    Len = iolist_size(Data),
-    ok = gen_tcp:send(Sock, [<<Len:24/little, Seq:8>>, Data]).
+handle_packet_header_recv({ok, <<Len:24/little, Seq:8>>}, Sock) ->
+    handle_packet_payload_recv(mysql_net:recv(Sock, Len), Seq).
 
-asciiz(Data) ->
-    [Str, Rest] = binary:split(Data, <<0>>),
-    {Str, Rest}.
-
-strip_null(Str) ->
-    [Stripped, <<>>] = binary:split(Str, <<0>>),
-    Stripped.
-
-maybe_strip_null(Str) ->
-    case binary:split(Str, <<0>>) of
-        [Stripped, <<>>] -> Stripped;
-        [Str] -> Str
-    end.
-
-apply_decoders([Decoder|Rest], Data0, Acc0) ->
-    {Data, Acc} = Decoder(Data0, Acc0),
-    apply_decoders(Rest, Data, Acc);
-apply_decoders([], _Data, Acc) -> Acc.
-
-apply_encoders([Encoder|Rest], State0, DataAcc0) ->
-    {State, DataAcc} = Encoder(State0, DataAcc0),
-    apply_encoders(Rest, State, DataAcc);
-apply_encoders([], _State, DataAcc) ->
-    lists:reverse(DataAcc).
-
-packet_data({_Seq, Data}) -> Data.
-
-next_seq(#handshake{seq=Seq}) -> Seq + 1.
-
-decode_integer(<<I:8/integer, Rest/binary>>) when I < 250 ->
-    {I, Rest}.
+handle_packet_payload_recv({ok, Packet}, Seq) ->
+    {ok, {Seq, Packet}}.
 
 %% ===================================================================
-%% Handshake
+%% Handshake decoder
 %% ===================================================================
 
-handshake({Seq, Data}) ->
-    Decoders = 
+decode_handshake(Data) ->
+    Decoders =
         [fun hs_protocol_version/2,
          fun hs_server_version/2,
          fun hs_connection_id/2,
@@ -146,10 +92,7 @@ handshake({Seq, Data}) ->
          fun hs_auth_plugin_data_len/2,
          fun hs_auth_plugin_data_2/2,
          fun hs_auth_plugin_name/2],
-    apply_decoders(Decoders, Data, init_handshake(Seq)).
-
-init_handshake(Seq) ->
-    #handshake{seq=Seq}.
+    apply_decoders(Decoders, Data, #handshake{}).
 
 hs_protocol_version(<<Ver:8, Rest/binary>>, HS) ->
     {Rest, HS#handshake{protocol_version=Ver}}.
@@ -193,10 +136,10 @@ hs_auth_plugin_name(Data, HS) ->
     {<<>>, HS#handshake{auth_plugin_name=Name}}.
 
 %% ===================================================================
-%% Handshake response
+%% Handshake response encoder
 %% ===================================================================
 
-handshake_response(HS, User, Pwd) ->
+encode_handshake_response(HS, User, Pwd) ->
     Encoders =
         [fun hsr_capabilities/2,
          fun hsr_max_packet_size/2,
@@ -205,8 +148,7 @@ handshake_response(HS, User, Pwd) ->
          fun hsr_username/2,
          fun hsr_auth_response/2],
     State = init_hs_response_state(HS, User, Pwd),
-    Data = apply_encoders(Encoders, State, []),
-    {next_seq(HS), Data}.
+    apply_encoders(Encoders, State, []).
 
 init_hs_response_state(HS, User, Pwd) ->
     #hs_response_state{
@@ -266,24 +208,26 @@ sha1_xor(H1, H2) ->
     <<Xored:160/integer>>.
 
 %% ===================================================================
-%% Generic response packet decoding
+%% Generic packet decoder
 %% ===================================================================
 
-decode_packet({Seq, <<?OK_HEADER:8, Data/binary>>}) ->
-    ok_packet(Seq, Data);
-decode_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
-    error_packet(Seq, Data).
+decode_packet(<<?OK_HEADER:8, Data/binary>>) ->
+    ok_packet(Data);
+decode_packet(<<?ERR_HEADER:8, Data/binary>>) ->
+    error_packet(Data);
+decode_packet(Data) ->
+    resultset_packet(Data).
 
 %% ===================================================================
 %% OK packet
 %% ===================================================================
 
-ok_packet(Seq, Data) ->
+ok_packet(Data) ->
     Decoders =
         [fun ok_affected_rows/2,
          fun ok_last_insert_id/2,
          fun ok_status_and_rest/2],
-    apply_decoders(Decoders, Data, #ok_packet{seq=Seq}).
+    apply_decoders(Decoders, Data, #ok_packet{}).
 
 ok_affected_rows(Data, OK) ->
     {Rows, Rest} = decode_integer(Data),
@@ -296,22 +240,68 @@ ok_last_insert_id(Data, OK) ->
 ok_status_and_rest(<<Status:16/little,
                      Warnings:16/little,
                      Info/binary>>, OK) ->
-    {<<>>,
-     OK#ok_packet{
-       status_flags=Status,
-       warnings=Warnings,
-       info=Info}}.
+    {<<>>, OK#ok_packet{
+             status_flags=Status,
+             warnings=Warnings,
+             info=Info}}.
 
 %% ===================================================================
 %% Error packet
 %% ===================================================================
 
-error_packet(Seq, <<Code:16/little,
-                    _:1/binary,
-                    SqlState:5/binary,
-                    Msg/binary>>) ->
-    #err_packet{
-       seq=Seq,
-       code=Code,
-       sqlstate=SqlState,
-       msg=Msg}.
+error_packet(<<Code:16/little,
+               _:1/binary,
+               SqlState:5/binary,
+               Msg/binary>>) ->
+    #err_packet{code=Code, sqlstate=SqlState, msg=Msg}.
+
+%% ===================================================================
+%% Query result packet
+%% ===================================================================
+
+resultset_packet(_Data) ->
+    xxx.
+
+%% ===================================================================
+%% Command packets
+%% ===================================================================
+
+com_ping() -> <<?COM_PING:8>>.
+
+com_quit() -> <<?COM_QUIT:8>>.
+
+com_init(Db) -> <<?COM_INIT:8, Db/binary>>.
+
+com_query(Query) -> <<?COM_QUERY:8, Query/binary>>.
+
+%% ===================================================================
+%% Helpers
+%% ===================================================================
+
+asciiz(Data) ->
+    [Str, Rest] = binary:split(Data, <<0>>),
+    {Str, Rest}.
+
+strip_null(Str) ->
+    [Stripped, <<>>] = binary:split(Str, <<0>>),
+    Stripped.
+
+maybe_strip_null(Str) ->
+    case binary:split(Str, <<0>>) of
+        [Stripped, <<>>] -> Stripped;
+        [Str] -> Str
+    end.
+
+apply_decoders([Decoder|Rest], Data0, Acc0) ->
+    {Data, Acc} = Decoder(Data0, Acc0),
+    apply_decoders(Rest, Data, Acc);
+apply_decoders([], _Data, Acc) -> Acc.
+
+apply_encoders([Encoder|Rest], State0, DataAcc0) ->
+    {State, DataAcc} = Encoder(State0, DataAcc0),
+    apply_encoders(Rest, State, DataAcc);
+apply_encoders([], _State, DataAcc) ->
+    lists:reverse(DataAcc).
+
+decode_integer(<<I:8/integer, Rest/binary>>) when I < 250 ->
+    {I, Rest}.
