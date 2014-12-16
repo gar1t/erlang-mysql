@@ -1,6 +1,6 @@
 -module(mysql_debug).
 
--export([hexdump/1]).
+-export([hexdump/1, catch_shell_exceptions/0]).
 
 hexdump(Data) ->
     Tmp = write_tmp_file(Data),
@@ -24,3 +24,7 @@ delay_delete(File) ->
     receive
     after 1000 -> file:delete(File)
     end.
+
+catch_shell_exceptions() ->
+    application_controller:set_env(stdlib, shell_catch_exception, true),
+    ok.

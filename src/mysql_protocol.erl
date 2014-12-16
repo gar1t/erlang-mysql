@@ -13,6 +13,8 @@
 %% Packet encoding/decoding
 -export([decode_handshake/1,
          decode_packet/1,
+         decode_column_definition/1,
+         decode_resultset_row/1,
          encode_handshake_response/3]).
 
 %% Command packets
@@ -48,8 +50,10 @@
 
 %% Generic response headers
 
--define(OK_HEADER,  16#00).
--define(ERR_HEADER, 16#ff).
+-define(OK_HEADER,   16#00).
+-define(ERR_HEADER,  16#ff).
+-define(EOF_HEADER,  16#fe).
+-define(NULL_HEADER, 16#fb).
 
 %% Commands
 
@@ -70,7 +74,9 @@ recv_packet(Sock) ->
     handle_packet_header_recv(mysql_net:recv(Sock, 4), Sock).
 
 handle_packet_header_recv({ok, <<Len:24/little, Seq:8>>}, Sock) ->
-    handle_packet_payload_recv(mysql_net:recv(Sock, Len), Seq).
+    handle_packet_payload_recv(mysql_net:recv(Sock, Len), Seq);
+handle_packet_header_recv({error, Err}, _Sock) ->
+    {error, Err}.
 
 handle_packet_payload_recv({ok, Packet}, Seq) ->
     {ok, {Seq, Packet}}.
@@ -211,12 +217,16 @@ sha1_xor(H1, H2) ->
 %% Generic packet decoder
 %% ===================================================================
 
-decode_packet(<<?OK_HEADER:8, Data/binary>>) ->
-    ok_packet(Data);
-decode_packet(<<?ERR_HEADER:8, Data/binary>>) ->
-    error_packet(Data);
-decode_packet(Data) ->
-    resultset_packet(Data).
+decode_packet({Seq, <<?OK_HEADER:8, Data/binary>>}) ->
+    {Seq, ok_packet(Data)};
+decode_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
+    {Seq, error_packet(Data)};
+decode_packet({Seq, <<?EOF_HEADER:8, Data/binary>>}) ->
+    {Seq, eof_packet(Data)};
+decode_packet({1, Data}) ->
+    {1, init_resultset_packet(Data)};
+decode_packet({Seq, Data}) ->
+    {Seq, raw_packet(Data)}.
 
 %% ===================================================================
 %% OK packet
@@ -256,11 +266,102 @@ error_packet(<<Code:16/little,
     #err_packet{code=Code, sqlstate=SqlState, msg=Msg}.
 
 %% ===================================================================
+%% EOF Packet
+%% ===================================================================
+
+eof_packet(<<Warnings:16/little, Status:16/little>>) ->
+    #eof_packet{warnings=Warnings, status_flags=Status}.
+
+%% ===================================================================
 %% Query result packet
 %% ===================================================================
 
-resultset_packet(_Data) ->
-    xxx.
+init_resultset_packet(Data) ->
+    {ColCount, <<>>} = decode_integer(Data),
+    #resultset_packet{column_count=ColCount}.
+
+%% ===================================================================
+%% Unknown packet
+%% ===================================================================
+
+raw_packet(Data) ->
+    #raw_packet{data=Data}.
+
+%% ===================================================================
+%% Column definition decoder
+%% ===================================================================
+
+decode_column_definition(Data) ->
+    Decoders =
+        [fun col_catalog/2,
+         fun col_schema/2,
+         fun col_table/2,
+         fun col_org_table/2,
+         fun col_name/2,
+         fun col_org_name/2,
+         fun col_fixed_length_fields/2,
+         fun col_default_values/2],
+    apply_decoders(Decoders, Data, #coldef{}).
+
+col_catalog(Data, C) ->
+    {Catalog, Rest} = decode_string(Data),
+    {Rest, C#coldef{catalog=Catalog}}.
+
+col_schema(Data, C) ->
+    {Schema, Rest} = decode_string(Data),
+    {Rest, C#coldef{schema=Schema}}.
+
+col_table(Data, C) ->
+    {Table, Rest} = decode_string(Data),
+    {Rest, C#coldef{table=Table}}.
+
+col_org_table(Data, C) ->
+    {Table, Rest} = decode_string(Data),
+    {Rest, C#coldef{org_table=Table}}.
+
+col_name(Data, C) ->
+    {Name, Rest} = decode_string(Data),
+    {Rest, C#coldef{name=Name}}.
+
+col_org_name(Data, C) ->
+    {Name, Rest} = decode_string(Data),
+    {Rest, C#coldef{org_name=Name}}.
+
+col_fixed_length_fields(
+  <<16#0c,
+    CharacterSet:16/little,
+    ColLength:32/little,
+    Type:8,
+    Flags:16/little,
+    Decimals:8,
+    0, 0,
+    Rest/binary>>, C) ->
+    {Rest, C#coldef{
+             character_set=CharacterSet,
+             column_length=ColLength,
+             type=Type,
+             flags=Flags,
+             decimals=Decimals}}.
+
+col_default_values(<<>>, C) -> {<<>>, C};
+col_default_values(Data, C) ->
+    {Len, ValuesPlusRest} = decode_integer(Data),
+    {Rest, Values} = split_at_len(ValuesPlusRest, Len),
+    {Rest, C#coldef{default_values=Values}}.
+
+%% ===================================================================
+%% Row decoder
+%% ===================================================================
+
+decode_resultset_row(<<?NULL_HEADER:8>>) -> null;
+decode_resultset_row(Data) ->
+    acc_decoded_strings(Data, []).
+
+acc_decoded_strings(<<>>, Acc) ->
+    lists:reverse(Acc);
+acc_decoded_strings(Data, Acc) ->
+    {Str, Rest} = decode_string(Data),
+    acc_decoded_strings(Rest, [Str|Acc]).
 
 %% ===================================================================
 %% Command packets
@@ -303,5 +404,18 @@ apply_encoders([Encoder|Rest], State0, DataAcc0) ->
 apply_encoders([], _State, DataAcc) ->
     lists:reverse(DataAcc).
 
-decode_integer(<<I:8/integer, Rest/binary>>) when I < 250 ->
-    {I, Rest}.
+decode_integer(<<I:8/integer,        Rest/binary>>) when I < 251 -> {I, Rest};
+decode_integer(<<16#fc, I:16/little, Rest/binary>>) -> {I, Rest};
+decode_integer(<<16#fd, I:24/little, Rest/binary>>) -> {I, Rest};
+decode_integer(<<16#fe, I:32/little, Rest/binary>>) -> {I, Rest}.
+
+decode_string(<<16#fb, Rest/binary>>) ->
+    {null, Rest};
+decode_string(Data) ->
+    {Len, StrPlusRest} = decode_integer(Data),
+    split_at_len(StrPlusRest, Len).
+
+split_at_len(Data, Len) ->
+    P1 = binary:part(Data, 0, Len),
+    P2 = binary:part(Data, Len, size(Data) - Len),
+    {P1, P2}.

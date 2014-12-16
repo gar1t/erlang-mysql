@@ -6,8 +6,7 @@
         {password, string()} |
         {database, string()} |
         {dsn, string()}.
-        
--type dbapi_connect_error_reason() ::
-        timeout.
 
--record(dberr, {sqlstate, native, msg}).
+-type dbapi_db() :: term().
+
+-type dbapi_connect_error_reason() :: term().

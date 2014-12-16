@@ -40,17 +40,14 @@ recv_handshake(Sock) ->
 handshake_response(Handshake, User, Password) ->
     mysql_protocol:encode_handshake_response(Handshake, User, Password).
 
-auth_phase(#state{sock=Sock}=State) ->
-    handle_response_ack(recv_response_ack(Sock), State).
+auth_phase(#state{sock=Sock}=S) ->
+    ResponseAck = recv_response_ack(Sock),
+    S#state{auth_result=ResponseAck}.
 
 recv_response_ack(Sock) ->
-    {_Seq, Packet} = recv_packet(Sock),
-    mysql_protocol:decode_packet(Packet).
-
-handle_response_ack(#ok_packet{}, S) ->
-    S#state{auth_result=ok};
-handle_response_ack(#err_packet{}=Err, S) ->
-    S#state{auth_result={error, mysql_util:dberr(Err)}}.
+    Packet = recv_packet(Sock),
+    {_Seq, Ack} = mysql_protocol:decode_packet(Packet),
+    Ack.
 
 authenticate_result(#state{auth_result=Result}) -> Result.
 
