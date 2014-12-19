@@ -278,7 +278,7 @@ eof_packet(<<Warnings:16/little, Status:16/little>>) ->
     #eof_packet{warnings=Warnings, status_flags=Status}.
 
 %% ===================================================================
-%% Query result packet
+%% Resulset packet
 %% ===================================================================
 
 init_resultset(Data) ->
@@ -381,10 +381,6 @@ decode_stmt_prepare_resp_packet({Seq, <<?OK_HEADER:8, Data/binary>>}) ->
     {Seq, init_prepared_stmt(Data)};
 decode_stmt_prepare_resp_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
     {Seq, error_packet(Data)};
-%% decode_packet({Seq, <<?EOF_HEADER:8, Data/binary>>}) ->
-%%     {Seq, eof_packet(Data)};
-%% decode_packet({1, Data}) ->
-%%     {1, init_resultset(Data)};
 decode_stmt_prepare_resp_packet({Seq, Data}) ->
     {Seq, raw_packet(Data)}.
 

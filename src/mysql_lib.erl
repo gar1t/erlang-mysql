@@ -11,7 +11,6 @@
 
 -export([connect/1,
          close/1,
-         simple_command/3,
          query/2,
          prepare_statement/2,
          execute_statement/3,
@@ -36,8 +35,8 @@ connect(Options) ->
     User = mysql_util:option(user, Options, ?DEFAULT_USER),
     Pwd = mysql_util:option(password, Options, ?DEFAULT_PWD),
     Timeout = mysql_util:option(timeout, Options, ?DEFAULT_CONNECT_TIMEOUT),
-    ConnectResult = mysql_net:connect(Host, Port, Timeout),
-    try_authenticate(ConnectResult, User, Pwd).
+    ConnectResp = mysql_net:connect(Host, Port, Timeout),
+    try_authenticate(ConnectResp, User, Pwd).
 
 try_authenticate({ok, Sock}, User, Pwd) ->
     handle_authenticate(mysql_auth:authenticate(Sock, User, Pwd), Sock);
@@ -66,13 +65,8 @@ try_close(Sock) ->
     end.
 
 %% ===================================================================
-%% Simple command
+%% Command support
 %% ===================================================================
-
-simple_command(#mysql{sock=Sock}, Command, Args) ->
-    send_packet(Sock, 0, com_packet(Command, Args)),
-    {_Seq, Result} = recv_decoded_packet(Sock),
-    Result.
 
 com_packet(ping, []) -> mysql_protocol:com_ping();
 com_packet(quit, []) -> mysql_protocol:com_quit();
@@ -107,30 +101,29 @@ decode_packet(Packet) ->
 
 query(#mysql{sock=Sock}, Query) ->
     send_packet(Sock, 0, com_packet(query, [Query])),
-    recv_query_result(Sock).
+    recv_query_resp(Sock).
 
-%% TODO: rename "result" to "response" for consistency with MySQL docs
-recv_query_result(Sock) ->
+recv_query_resp(Sock) ->
     Packet = recv_decoded_packet(Sock),
-    handle_query_result_first_packet(Packet, Sock).
+    handle_query_resp_first_packet(Packet, Sock).
 
-handle_query_result_first_packet({1, #ok_packet{}=OK}, _Sock) ->
+handle_query_resp_first_packet({1, #ok_packet{}=OK}, _Sock) ->
     OK;
-handle_query_result_first_packet({1, #resultset{}=RS}, Sock) ->
-    recv_query_result_columns(Sock, RS);
-handle_query_result_first_packet({1, #err_packet{}=Err}, _Sock) ->
+handle_query_resp_first_packet({1, #resultset{}=RS}, Sock) ->
+    recv_query_resp_columns(Sock, RS);
+handle_query_resp_first_packet({1, #err_packet{}=Err}, _Sock) ->
     Err.
 
-recv_query_result_columns(Sock, RS) ->
+recv_query_resp_columns(Sock, RS) ->
     Packet = recv_decoded_packet(Sock),
-    handle_query_result_column(Packet, Sock, RS).
+    handle_query_resp_column(Packet, Sock, RS).
 
-handle_query_result_column({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
+handle_query_resp_column({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
     ColDef = mysql_protocol:decode_column_definition(Data),
     Packet = recv_decoded_packet(Sock),
-    handle_query_result_column(Packet, Sock, add_rs_column(ColDef, RS));
-handle_query_result_column({_Seq, #eof_packet{}}, Sock, RS) ->
-    recv_query_result_rows(Sock, finalize_rs_columns(RS)).
+    handle_query_resp_column(Packet, Sock, add_rs_column(ColDef, RS));
+handle_query_resp_column({_Seq, #eof_packet{}}, Sock, RS) ->
+    recv_query_resp_rows(Sock, finalize_rs_columns(RS)).
 
 add_rs_column(Col, #resultset{columns=Cols}=RS) ->
     RS#resultset{columns=[Col|Cols]}.
@@ -138,15 +131,15 @@ add_rs_column(Col, #resultset{columns=Cols}=RS) ->
 finalize_rs_columns(#resultset{columns=Cols}=RS) ->
     RS#resultset{columns=lists:reverse(Cols)}.
 
-recv_query_result_rows(Sock, RS) ->
+recv_query_resp_rows(Sock, RS) ->
     Packet = recv_decoded_packet(Sock),
-    handle_query_result_row(Packet, Sock, RS).
+    handle_query_resp_row(Packet, Sock, RS).
 
-handle_query_result_row({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
+handle_query_resp_row({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
     Row = mysql_protocol:decode_resultset_row(Data),
     Packet = recv_decoded_packet(Sock),
-    handle_query_result_row(Packet, Sock, add_row(Row, RS));
-handle_query_result_row({_Seq, #eof_packet{}}, _Sock, RS) ->
+    handle_query_resp_row(Packet, Sock, add_row(Row, RS));
+handle_query_resp_row({_Seq, #eof_packet{}}, _Sock, RS) ->
     finalize_rows(RS).
 
 add_row(Row, #resultset{rows=Rows}=RS) ->
