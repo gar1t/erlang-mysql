@@ -13,6 +13,9 @@
          close/1,
          simple_command/3,
          query/2,
+         prepare_statement/2,
+         execute_statement/3,
+         close_statement/2,
          ping/1]).
 
 -include("mysql_internal.hrl").
@@ -73,7 +76,8 @@ simple_command(#mysql{sock=Sock}, Command, Args) ->
 
 com_packet(ping, []) -> mysql_protocol:com_ping();
 com_packet(quit, []) -> mysql_protocol:com_quit();
-com_packet(query, [Query]) -> mysql_protocol:com_query(Query).
+com_packet(query, [Query]) -> mysql_protocol:com_query(Query);
+com_packet(stmt_prepare, [Query]) -> mysql_protocol:com_stmt_prepare(Query).
 
 send_packet(Sock, Seq, Packet) ->
     handle_send_packet(mysql_protocol:send_packet(Sock, Seq, Packet)).
@@ -104,13 +108,14 @@ query(#mysql{sock=Sock}, Query) ->
     send_packet(Sock, 0, com_packet(query, [Query])),
     recv_query_result(Sock).
 
+%% TODO: rename "result" to "response" for consistency with MySQL docs
 recv_query_result(Sock) ->
     Packet = recv_decoded_packet(Sock),
     handle_query_result_first_packet(Packet, Sock).
 
 handle_query_result_first_packet({1, #ok_packet{}=OK}, _Sock) ->
     OK;
-handle_query_result_first_packet({1, #resultset_packet{}=RS}, Sock) ->
+handle_query_result_first_packet({1, #resultset{}=RS}, Sock) ->
     recv_query_result_columns(Sock, RS);
 handle_query_result_first_packet({1, #err_packet{}=Err}, _Sock) ->
     Err.
@@ -122,15 +127,15 @@ recv_query_result_columns(Sock, RS) ->
 handle_query_result_column({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
     ColDef = mysql_protocol:decode_column_definition(Data),
     Packet = recv_decoded_packet(Sock),
-    handle_query_result_column(Packet, Sock, add_column(ColDef, RS));
+    handle_query_result_column(Packet, Sock, add_rs_column(ColDef, RS));
 handle_query_result_column({_Seq, #eof_packet{}}, Sock, RS) ->
-    recv_query_result_rows(Sock, finalize_columns(RS)).
+    recv_query_result_rows(Sock, finalize_rs_columns(RS)).
 
-add_column(Col, #resultset_packet{columns=Cols}=RS) ->
-    RS#resultset_packet{columns=[Col|Cols]}.
+add_rs_column(Col, #resultset{columns=Cols}=RS) ->
+    RS#resultset{columns=[Col|Cols]}.
 
-finalize_columns(#resultset_packet{columns=Cols}=RS) ->
-    RS#resultset_packet{columns=lists:reverse(Cols)}.
+finalize_rs_columns(#resultset{columns=Cols}=RS) ->
+    RS#resultset{columns=lists:reverse(Cols)}.
 
 recv_query_result_rows(Sock, RS) ->
     Packet = recv_decoded_packet(Sock),
@@ -143,11 +148,83 @@ handle_query_result_row({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
 handle_query_result_row({_Seq, #eof_packet{}}, _Sock, RS) ->
     finalize_rows(RS).
 
-add_row(Row, #resultset_packet{rows=Rows}=RS) ->
-    RS#resultset_packet{rows=[list_to_tuple(Row)|Rows]}.
+add_row(Row, #resultset{rows=Rows}=RS) ->
+    RS#resultset{rows=[list_to_tuple(Row)|Rows]}.
 
-finalize_rows(#resultset_packet{rows=Rows}=RS) ->
-    RS#resultset_packet{rows=lists:reverse(Rows)}.
+finalize_rows(#resultset{rows=Rows}=RS) ->
+    RS#resultset{rows=lists:reverse(Rows)}.
+
+%% ===================================================================
+%% Prepare statement
+%% ===================================================================
+
+prepare_statement(#mysql{sock=Sock}, Query) ->
+    send_packet(Sock, 0, com_packet(stmt_prepare, [Query])),
+    recv_stmt_prepare_resp(Sock).
+
+recv_stmt_prepare_resp(Sock) ->
+    Packet = recv_decoded_stmt_prepare_resp_packet(Sock),
+    handle_stmt_prepare_resp_first_packet(Packet, Sock).
+        
+recv_decoded_stmt_prepare_resp_packet(Sock) ->
+    mysql_protocol:decode_stmt_prepare_resp_packet(recv_packet(Sock)).
+
+handle_stmt_prepare_resp_first_packet({1, #prepared_stmt{}=Stmt}, Sock) ->
+    recv_prepared_stmt_params(Sock, Stmt);
+handle_stmt_prepare_resp_first_packet({1, #err_packet{}=Err}, _Sock) ->
+    Err.
+
+recv_prepared_stmt_params(Sock, #prepared_stmt{param_count=0}=Stmt) ->
+    recv_prepared_stmt_cols(Sock, finalize_stmt_params(Stmt));
+recv_prepared_stmt_params(Sock, Stmt) ->
+    Packet = recv_decoded_packet(Sock),
+    handle_prepared_stmt_param(Packet, Sock, Stmt).
+
+handle_prepared_stmt_param({_Seq, #raw_packet{data=Data}}, Sock, Stmt) ->
+    ColDef = mysql_protocol:decode_column_definition(Data),
+    Packet = recv_decoded_packet(Sock),
+    handle_prepared_stmt_param(Packet, Sock, add_stmt_param(ColDef, Stmt));
+handle_prepared_stmt_param({_Seq, #eof_packet{}}, Sock, Stmt) ->
+    recv_prepared_stmt_cols(Sock, finalize_stmt_params(Stmt)).
+
+add_stmt_param(Param, #prepared_stmt{params=Params}=Stmt) ->
+    Stmt#prepared_stmt{params=[Param|Params]}.
+
+finalize_stmt_params(#prepared_stmt{params=Params}=Stmt) ->
+    Stmt#prepared_stmt{params=lists:reverse(Params)}.
+
+recv_prepared_stmt_cols(_Sock, #prepared_stmt{column_count=0}=Stmt) ->
+    Stmt;
+recv_prepared_stmt_cols(Sock, Stmt) ->
+    Packet = recv_decoded_packet(Sock),
+    handle_prepared_stmt_col(Packet, Sock, Stmt).
+
+handle_prepared_stmt_col({_Seq, #raw_packet{data=Data}}, Sock, Stmt) ->
+    ColDef = mysql_protocol:decode_column_definition(Data),
+    Packet = recv_decoded_packet(Sock),
+    handle_prepared_stmt_col(Packet, Sock, add_stmt_col(ColDef, Stmt));
+handle_prepared_stmt_col({_Seq, #eof_packet{}}, _Sock, Stmt) ->
+    finalize_stmt_cols(Stmt).
+
+add_stmt_col(Col, #prepared_stmt{columns=Cols}=Stmt) ->
+    Stmt#prepared_stmt{columns=[Col|Cols]}.
+
+finalize_stmt_cols(#prepared_stmt{columns=Cols}=Stmt) ->
+    Stmt#prepared_stmt{columns=lists:reverse(Cols)}.
+
+%% ===================================================================
+%% Execute statement
+%% ===================================================================
+
+execute_statement(_Db, _Stmt, _Params) ->
+    xxx.
+
+%% ===================================================================
+%% Close statement
+%% ===================================================================
+
+close_statement(_Db, _Stmt) ->
+    xxx.
 
 %% ===================================================================
 %% Command wrappers
@@ -155,4 +232,3 @@ finalize_rows(#resultset_packet{rows=Rows}=RS) ->
 
 ping(Db) ->
     simple_command(Db, ping, []).
-

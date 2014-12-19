@@ -16,7 +16,7 @@
         {warnings,
          status_flags}).
 
--record(resultset_packet,
+-record(resultset,
         {column_count,
          columns=[],
          rows=[]}).
@@ -34,5 +34,13 @@
          flags,
          decimals,
          default_values}).
+
+-record(prepared_stmt,
+        {stmt_id,
+         column_count,
+         param_count,
+         warning_count,
+         params=[],
+         columns=[]}).
 
 -record(raw_packet, {data}).

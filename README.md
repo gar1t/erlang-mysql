@@ -57,6 +57,16 @@ conversion functions, which can be used explicitly.
 Note that the binary prepared statement protocol provides results as encoded
 native values, which is far more efficient.
 
+## Concurrent Access
+
+The library assumes one process acting on a connection at any one time.
+
+## Async vs Sync Interface
+
+The PostgreSQL Erlang bindings provide two interfaces: asynchronous and
+synchronous. The MySQL library (and the DB API) defines a synchronous interface
+that is assumed to be used by one process at a time.
+
 # DBAPI
 
 ## Query Results
@@ -135,6 +145,79 @@ Additionally, the spec could require the module to support various `column_xxx`
 properties, which applied a map to the columns in a result set (or undefined
 otherwise). E.g. `column_names` would return a map of column names for a
 resulset.
+
+## Prepared Statement
+
+A prepared statement is like a text query on the surface. But MySQL implements
+a very different protocol for it:
+
+- A query is first "prepared" on the server
+- Operations are performed using a reference to the statement, which lives on
+  the server
+- The statement represents lifecycle must be managed by the client
+- The inbound parameters and result set is encoded as native types rather than
+  text
+
+At first glance, the prepared statement interface should be reflected
+differently. However, consider these points:
+
+- The ODBC supports perpared statements via `param_query` but hides their
+  lifecycle - it's not clear if prepared statements are reused (though
+  obviously they should be, it's not clear from the docs)
+
+- The Python DB API recommends that libraries reuse prepared statements as an
+  optimization, but otherwise hides their lifecycle (i.e. no explicit "release"
+  or "free" interface)
+
+Our options:
+
+- Hide the prepared statement functionality behind a "smart" query facility
+  (this is what the Python DB API spec calls for)
+- Fully expose the prepared statement interface (the PostgeSQL library supports
+  this)
+- Expose the "prepare" functionality but otherwise ignore the lifecycle issues
+
+### Option 1: Hide Statements - Use Implicitly
+
+The Python DB API is the model for this approach. It provides a single
+`execute` function that accepts an optional list of parameters. If the
+parameters are provided, the library may use that as an opportunity to first
+prepare a statement using the query arg and then execute that statement using
+the parameters. The library may reuse a previously prepared statement (using a
+cache) for subsequent calls using the same query (compare using a hash).
+
+This is a nice approach in that it hides complexity and maintains a single
+interface for both so called "simple queries" and prepared statements.
+
+It however places this responsibility on the library:
+
+- Implicitly prepare a statement when parameters are provided (and not already
+  cached)
+
+- Cache queries (this requires a managed caching facility or lazy use of
+  ets - both of these are complicated)
+
+- Address "maximum cached prepared statements" to avoid the theoretical
+  possibility of running out of resources (while this is not likely and does
+  not aopear to be addressed in any of the libraries that hide this
+  functionality, it's still a point of consideration)
+
+### Option 2: Exerything Explicit
+
+In this case the client would assume responsbility for preparing statements and
+using the statement references in place of the text based queries.
+
+It would require functions to explicitly create and delete statements:
+
+```
+dbapi:prepare(Query) -> {ok, Statement} | {error, Reason}
+dbapi:close_statement(Statement) -> ok
+```
+
+We might consider an explicit `close_statement` to differentiate closing a
+database connection from freeing memory used by a prepared statement. Or,
+alternatively, `free`. We're really talking about a counterpart to `prepare`
+(similar to `connect` vs `close`).
 
 ## Error Details
 

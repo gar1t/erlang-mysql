@@ -14,6 +14,7 @@
 -export([decode_handshake/1,
          decode_packet/1,
          decode_column_definition/1,
+         decode_stmt_prepare_resp_packet/1,
          decode_resultset_row/1,
          encode_handshake_response/3]).
 
@@ -21,7 +22,8 @@
 -export([com_quit/0,
          com_init/1,
          com_query/1,
-         com_ping/0]).
+         com_ping/0,
+         com_stmt_prepare/1]).
 
 -include("mysql_internal.hrl").
 
@@ -57,10 +59,11 @@
 
 %% Commands
 
--define(COM_QUIT,  16#01).
--define(COM_INIT,  16#02).
--define(COM_QUERY, 16#03).
--define(COM_PING,  16#0e).
+-define(COM_QUIT,         16#01).
+-define(COM_INIT,         16#02).
+-define(COM_QUERY,        16#03).
+-define(COM_PING,         16#0e).
+-define(COM_STMT_PREPARE, 16#16).
 
 %% ===================================================================
 %% Network
@@ -224,7 +227,7 @@ decode_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
 decode_packet({Seq, <<?EOF_HEADER:8, Data/binary>>}) ->
     {Seq, eof_packet(Data)};
 decode_packet({1, Data}) ->
-    {1, init_resultset_packet(Data)};
+    {1, init_resultset(Data)};
 decode_packet({Seq, Data}) ->
     {Seq, raw_packet(Data)}.
 
@@ -276,9 +279,9 @@ eof_packet(<<Warnings:16/little, Status:16/little>>) ->
 %% Query result packet
 %% ===================================================================
 
-init_resultset_packet(Data) ->
+init_resultset(Data) ->
     {ColCount, <<>>} = decode_integer(Data),
-    #resultset_packet{column_count=ColCount}.
+    #resultset{column_count=ColCount}.
 
 %% ===================================================================
 %% Unknown packet
@@ -364,6 +367,38 @@ acc_decoded_strings(Data, Acc) ->
     acc_decoded_strings(Rest, [Str|Acc]).
 
 %% ===================================================================
+%% Statement response packet decoder
+%%
+%% MySQL cleverly reuses the same packet header for OK and
+%% STMT_PREPARE_OK, even though they're completely different
+%% structures. This variant of decode packet should be used for stmt
+%% prepare responses.
+%% ===================================================================
+
+decode_stmt_prepare_resp_packet({Seq, <<?OK_HEADER:8, Data/binary>>}) ->
+    {Seq, init_prepared_stmt(Data)};
+decode_stmt_prepare_resp_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
+    {Seq, error_packet(Data)};
+%% decode_packet({Seq, <<?EOF_HEADER:8, Data/binary>>}) ->
+%%     {Seq, eof_packet(Data)};
+%% decode_packet({1, Data}) ->
+%%     {1, init_resultset(Data)};
+decode_stmt_prepare_resp_packet({Seq, Data}) ->
+    {Seq, raw_packet(Data)}.
+
+init_prepared_stmt(
+  <<StmtId:32/little,
+    ColCount:16/little,
+    ParamCount:16/little,
+    _:8,
+    WarningCount:16/little>>) ->
+    #prepared_stmt{
+       stmt_id=StmtId,
+       column_count=ColCount,
+       param_count=ParamCount,
+       warning_count=WarningCount}.
+
+%% ===================================================================
 %% Command packets
 %% ===================================================================
 
@@ -374,6 +409,8 @@ com_quit() -> <<?COM_QUIT:8>>.
 com_init(Db) -> <<?COM_INIT:8, Db/binary>>.
 
 com_query(Query) -> <<?COM_QUERY:8, Query/binary>>.
+
+com_stmt_prepare(Query) -> <<?COM_STMT_PREPARE:8, Query/binary>>.
 
 %% ===================================================================
 %% Helpers

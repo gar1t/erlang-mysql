@@ -24,8 +24,8 @@
          last/1,
          prev/1,
          close/1,
-         commit/1,
-         rollback/1]).
+         prepare/2,
+         free/1]).
 
 %% Extra
 -export([ping/1]).
@@ -55,43 +55,45 @@ connect(_Options) ->
 execute(Db, Stmt) ->
     dbapi_result(mysql_lib:query(Db, iolist_to_binary(Stmt))).
 
-describe(#resultset_packet{}=RS) ->
+describe(#resultset{}=RS) ->
     describe_resultset(RS);
 describe(#ok_packet{}=OK) ->
     describe_ok(OK);
 describe(#err_packet{}=Err) ->
     describe_err(Err).
 
-describe(#resultset_packet{rows=Rows}, rowcount) ->
+describe(#resultset{rows=Rows}, rowcount) ->
     length(Rows);
 describe(#ok_packet{affected_rows=Rows}, rowcount) ->
     Rows;
-describe(#resultset_packet{columns=Cols}, column_names) ->
+describe(#resultset{columns=Cols}, column_names) ->
     [C#coldef.name || C <- Cols];
 describe(Term, Name) ->
     %% TODO: continue to optimize here - this is a catchall
     proplists:get_value(Name, describe(Term)).
 
-rows(#resultset_packet{rows=Rows}) -> Rows;
+rows(#resultset{rows=Rows}) -> Rows;
 rows(#ok_packet{}) -> [].
 
-next(#resultset_packet{rows=[Row|Rest]}=RS) ->
-    {Row, RS#resultset_packet{rows=Rest}};
-next(#resultset_packet{rows=[]}) -> eof;
+next(#resultset{rows=[Row|Rest]}=RS) ->
+    {Row, RS#resultset{rows=Rest}};
+next(#resultset{rows=[]}) -> eof;
 next(#ok_packet{}) -> eof.
 
 first(RS) -> next(RS).
 
-close(Db) ->
-    mysql_lib:close(Db).
-
-commit(_Db) -> ok.
-
-rollback(_Db) -> error(not_implemented).
-
 last(_) -> error(not_implemented).
 
 prev(_) -> error(not_implemented).
+
+prepare(Db, Stmt) ->
+    dbapi_result(mysql_lib:prepare_statement(Db, iolist_to_binary(Stmt))).
+
+close(Db) ->
+    mysql_lib:close(Db).
+
+free(Stmt) ->
+    mysql_lib:close_statement(Stmt).
 
 %% ===================================================================
 %% MySQL -> DB API
@@ -99,16 +101,18 @@ prev(_) -> error(not_implemented).
 
 dbapi_result(#ok_packet{}=OK) ->
     {ok, OK};
-dbapi_result(#resultset_packet{}=RS) ->
+dbapi_result(#resultset{}=RS) ->
     {ok, RS};
 dbapi_result(#err_packet{sqlstate=SqlState}=Err) ->
-    {error, {SqlState, Err}}.
+    {error, {SqlState, Err}};
+dbapi_result(#prepared_stmt{}=Stmt) ->
+    {ok, Stmt}.
 
 %% ===================================================================
 %% Descriptions
 %% ===================================================================
 
-describe_resultset(#resultset_packet{columns=Cols, rows=Rows}) ->
+describe_resultset(#resultset{columns=Cols, rows=Rows}) ->
     [{rowcount, length(Rows)},
      {columns, [describe_col(Col) || Col <- Cols]}].
 
