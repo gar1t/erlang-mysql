@@ -16,6 +16,7 @@
 %% DB API
 -export([connect/1,
          execute/2,
+         execute/3,
          describe/1,
          describe/2,
          rows/1,
@@ -25,7 +26,7 @@
          prev/1,
          close/1,
          prepare/2,
-         free/1]).
+         free/2]).
 
 %% Extra
 -export([ping/1]).
@@ -52,8 +53,11 @@ get_cfg(default_character_set) -> 0. %% TODO try 0
 connect(_Options) ->
     mysql_lib:connect([]).
 
-execute(Db, Stmt) ->
-    dbapi_result(mysql_lib:query(Db, iolist_to_binary(Stmt))).
+execute(Db, Query) ->
+    dbapi_result(mysql_lib:query(Db, iolist_to_binary(Query))).
+
+execute(Db, Stmt, Params) ->
+    dbapi_result(mysql_lib:execute_statement(Db, Stmt, Params)).
 
 describe(#resultset{}=RS) ->
     describe_resultset(RS);
@@ -92,8 +96,8 @@ prepare(Db, Stmt) ->
 close(Db) ->
     mysql_lib:close(Db).
 
-free(Stmt) ->
-    mysql_lib:close_statement(Stmt).
+free(Db, Stmt) ->
+    mysql_lib:close_statement(Db, Stmt).
 
 %% ===================================================================
 %% MySQL -> DB API

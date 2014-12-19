@@ -23,7 +23,8 @@
          com_init/1,
          com_query/1,
          com_ping/0,
-         com_stmt_prepare/1]).
+         com_stmt_prepare/1,
+         com_stmt_close/1]).
 
 -include("mysql_internal.hrl").
 
@@ -64,6 +65,7 @@
 -define(COM_QUERY,        16#03).
 -define(COM_PING,         16#0e).
 -define(COM_STMT_PREPARE, 16#16).
+-define(COM_STMT_CLOSE,   16#19).
 
 %% ===================================================================
 %% Network
@@ -411,6 +413,8 @@ com_init(Db) -> <<?COM_INIT:8, Db/binary>>.
 com_query(Query) -> <<?COM_QUERY:8, Query/binary>>.
 
 com_stmt_prepare(Query) -> <<?COM_STMT_PREPARE:8, Query/binary>>.
+
+com_stmt_close(StmtId) -> <<?COM_STMT_CLOSE:8, StmtId:32/little>>.
 
 %% ===================================================================
 %% Helpers
