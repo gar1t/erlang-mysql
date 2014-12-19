@@ -54,7 +54,7 @@ handle_authenticate(#err_packet{}=Err, Sock) ->
 %% ===================================================================
 
 close(#mysql{sock=Sock}) ->
-    send_packet(Sock, 0, com_packet(quit, [])),
+    send_packet(Sock, 0, mysql_protocol:com_quit()),
     try_close(Sock).
 
 try_close(Sock) ->
@@ -67,12 +67,6 @@ try_close(Sock) ->
 %% ===================================================================
 %% Command support
 %% ===================================================================
-
-com_packet(ping, []) -> mysql_protocol:com_ping();
-com_packet(quit, []) -> mysql_protocol:com_quit();
-com_packet(query, [Query]) -> mysql_protocol:com_query(Query);
-com_packet(stmt_prepare, [Query]) -> mysql_protocol:com_stmt_prepare(Query);
-com_packet(stmt_close, [StmtId]) -> mysql_protocol:com_stmt_close(StmtId).
 
 send_packet(Sock, Seq, Packet) ->
     handle_send_packet(mysql_protocol:send_packet(Sock, Seq, Packet)).
@@ -100,7 +94,7 @@ decode_packet(Packet) ->
 %% ===================================================================
 
 query(#mysql{sock=Sock}, Query) ->
-    send_packet(Sock, 0, com_packet(query, [Query])),
+    send_packet(Sock, 0, mysql_protocol:com_query(Query)),
     recv_query_resp(Sock).
 
 recv_query_resp(Sock) ->
@@ -153,7 +147,7 @@ finalize_rows(#resultset{rows=Rows}=RS) ->
 %% ===================================================================
 
 prepare_statement(#mysql{sock=Sock}, Query) ->
-    send_packet(Sock, 0, com_packet(stmt_prepare, [Query])),
+    send_packet(Sock, 0, mysql_protocol:com_stmt_prepare(Query)),
     recv_stmt_prepare_resp(Sock).
 
 recv_stmt_prepare_resp(Sock) ->
@@ -212,17 +206,20 @@ finalize_stmt_cols(#prepared_stmt{columns=Cols}=Stmt) ->
 
 execute_statement(_Db, _Stmt, _Params) ->
     xxx.
+    %send_statement(Sock, 0, com_statement(stmt_execute,
 
 %% ===================================================================
 %% Close statement
 %% ===================================================================
 
 close_statement(#mysql{sock=Sock}, #prepared_stmt{stmt_id=Id}) ->
-    send_packet(Sock, 0, com_packet(stmt_close, [Id])).
+    send_packet(Sock, 0, mysql_protocol:com_stmt_close(Id)).
 
 %% ===================================================================
 %% Command wrappers
 %% ===================================================================
 
 ping(#mysql{sock=Sock}) ->
-    send_packet(Sock, 0, com_packet(ping, [])).
+    send_packet(Sock, 0, mysql_protocol:com_ping()),
+    {1, Resp} = decode_packet(recv_packet(Sock)),
+    Resp.
