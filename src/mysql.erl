@@ -57,7 +57,8 @@ execute(Db, Query) ->
     dbapi_result(mysql_lib:query(Db, iolist_to_binary(Query))).
 
 execute(Db, Stmt, Params) ->
-    dbapi_result(mysql_lib:execute_statement(Db, Stmt, Params)).
+    %% TODO: dbapi resultify this
+    mysql_lib:execute_statement(Db, Stmt, Params).
 
 describe(#resultset{}=RS) ->
     describe_resultset(RS);

@@ -24,6 +24,7 @@
          com_query/1,
          com_ping/0,
          com_stmt_prepare/1,
+         com_stmt_execute/2,
          com_stmt_close/1]).
 
 -include("mysql_internal.hrl").
@@ -46,6 +47,11 @@
          user,
          password}).
 
+-record(stmt_exec_state,
+        {stmt_id,
+         params,
+         values}).
+
 %% Capability flags
 
 -define(CLIENT_PROTOCOL_41,       16#00000200).
@@ -65,6 +71,7 @@
 -define(COM_QUERY,        16#03).
 -define(COM_PING,         16#0e).
 -define(COM_STMT_PREPARE, 16#16).
+-define(COM_STMT_EXECUTE, 16#17).
 -define(COM_STMT_CLOSE,   16#19).
 
 %% ===================================================================
@@ -397,7 +404,7 @@ init_prepared_stmt(
        warning_count=WarningCount}.
 
 %% ===================================================================
-%% Command packets
+%% Simple command packets
 %% ===================================================================
 
 com_ping() -> <<?COM_PING:8>>.
@@ -411,6 +418,56 @@ com_query(Query) -> <<?COM_QUERY:8, Query/binary>>.
 com_stmt_prepare(Query) -> <<?COM_STMT_PREPARE:8, Query/binary>>.
 
 com_stmt_close(StmtId) -> <<?COM_STMT_CLOSE:8, StmtId:32/little>>.
+
+%% ===================================================================
+%% Stmt execute packet
+%% ===================================================================
+
+com_stmt_execute(Stmt, Values) ->
+    Encoders =
+        [fun stmt_exec_head/2,
+         fun stmt_exec_null_bitmap/2,
+         fun stmt_exec_new_params_bound_flag/2,
+         fun stmt_exec_params/2],
+    State = init_stmt_exec_state(Stmt, Values),
+    apply_encoders(Encoders, State, []).
+
+init_stmt_exec_state(#prepared_stmt{stmt_id=StmtId, params=Params}, Values) ->
+    #stmt_exec_state{
+       stmt_id=StmtId,
+       params=Params,
+       values=Values}.
+
+stmt_exec_head(#stmt_exec_state{stmt_id=StmtId}=State, Data) ->
+    Head = <<?COM_STMT_EXECUTE:8, StmtId:32/little, 0:8, 1:32/little>>,
+    {State, [Head|Data]}.
+
+%% stmt_exec_null_bitmap(#stmt_exec_state{params=Params}=State, Data) ->
+%%     N = (length(Params) + 7) div 8,
+%%     {State, [<<0:N/integer-unit:8>>|Data]}.
+stmt_exec_null_bitmap(State, Data) ->
+    {State, [<<4>>|Data]}.
+
+stmt_exec_new_params_bound_flag(State, Data) ->
+    {State, [<<1>>|Data]}.
+
+stmt_exec_params(#stmt_exec_state{values=Values}=Stmt, Data) ->
+    {EncodedTypes, EncodedVals} = encode_params(Values),
+    {Stmt, [EncodedVals, EncodedTypes|Data]}.
+
+encode_params(Values) ->
+    encode_params(Values, [], []).
+
+encode_params([Value|Rest], EncTypes, EncVals) ->
+    {EncType, EncVal} = encode_param(Value),
+    encode_params(Rest, [EncType|EncTypes], [EncVal|EncVals]);
+encode_params([], EncTypes, EncVals) ->
+    {lists:reverse(EncTypes), lists:reverse(EncVals)}.
+
+encode_param(I) when is_integer(I) ->
+    {<<16#03, 0>>, <<I:32/little>>};
+encode_param(null) ->
+    {<<16#06, 0>>, <<>>}.
 
 %% ===================================================================
 %% Helpers

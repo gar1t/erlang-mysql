@@ -204,9 +204,9 @@ finalize_stmt_cols(#prepared_stmt{columns=Cols}=Stmt) ->
 %% Execute statement
 %% ===================================================================
 
-execute_statement(_Db, _Stmt, _Params) ->
-    xxx.
-    %send_statement(Sock, 0, com_statement(stmt_execute,
+execute_statement(#mysql{sock=Sock}, Stmt, Values) ->
+    send_packet(Sock, 0, mysql_protocol:com_stmt_execute(Stmt, Values)),
+    recv_decoded_packet(Sock).
 
 %% ===================================================================
 %% Close statement
