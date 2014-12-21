@@ -27,6 +27,9 @@
          com_stmt_execute/2,
          com_stmt_close/1]).
 
+%% Other exports
+-export([null_bitmap/2]).
+
 -include("mysql_internal.hrl").
 
 -record(handshake,
@@ -73,6 +76,15 @@
 -define(COM_STMT_PREPARE, 16#16).
 -define(COM_STMT_EXECUTE, 16#17).
 -define(COM_STMT_CLOSE,   16#19).
+
+%% Column types
+
+-define(TYPE_LONG,     16#03).
+-define(TYPE_FLOAT,    16#04).
+-define(TYPE_DOUBLE,   16#05).
+-define(TYPE_NULL,     16#06).
+-define(TYPE_LONGLONG, 16#08).
+-define(TYPE_STRING,   16#fe).
 
 %% ===================================================================
 %% Network
@@ -442,11 +454,8 @@ stmt_exec_head(#stmt_exec_state{stmt_id=StmtId}=State, Data) ->
     Head = <<?COM_STMT_EXECUTE:8, StmtId:32/little, 0:8, 1:32/little>>,
     {State, [Head|Data]}.
 
-%% stmt_exec_null_bitmap(#stmt_exec_state{params=Params}=State, Data) ->
-%%     N = (length(Params) + 7) div 8,
-%%     {State, [<<0:N/integer-unit:8>>|Data]}.
-stmt_exec_null_bitmap(State, Data) ->
-    {State, [<<4>>|Data]}.
+stmt_exec_null_bitmap(#stmt_exec_state{values=Values}=State, Data) ->
+    {State, [null_bitmap(0, Values)|Data]}.
 
 stmt_exec_new_params_bound_flag(State, Data) ->
     {State, [<<1>>|Data]}.
@@ -465,9 +474,19 @@ encode_params([], EncTypes, EncVals) ->
     {lists:reverse(EncTypes), lists:reverse(EncVals)}.
 
 encode_param(I) when is_integer(I) ->
-    {<<16#03, 0>>, <<I:32/little>>};
+    encode_integer_param(I);
+encode_param(F) when is_float(F) ->
+    encode_float_param(F);
 encode_param(null) ->
     {<<16#06, 0>>, <<>>}.
+
+encode_integer_param(I) when I =< 16#ffffffff ->
+    {<<?TYPE_LONG, 0>>, <<I:32/little>>};
+encode_integer_param(I) when I =< 16#ffffffffffffffff ->
+    {<<?TYPE_LONGLONG, 0>>, <<I:64/little>>}.
+
+encode_float_param(F) ->
+    {<<?TYPE_DOUBLE, 0>>, <<F:64/little-float>>}.
 
 %% ===================================================================
 %% Helpers
@@ -513,3 +532,27 @@ split_at_len(Data, Len) ->
     P1 = binary:part(Data, 0, Len),
     P2 = binary:part(Data, Len, size(Data) - Len),
     {P1, P2}.
+
+null_bitmap(Offset, Values) ->
+    null_bitmap(Values, Offset, 0, 0).
+
+null_bitmap([Val|Rest], Offset, Field, Bitmap) ->
+    null_bitmap(
+      Rest, Offset, Field + 1,
+      apply_bit(Val, Field, Offset, Bitmap));
+null_bitmap([], Offset, FieldCount, Bitmap) ->
+    bitmap_bytes(Offset, FieldCount, Bitmap).
+
+apply_bit(null, Field, Offset, Bitmap) ->
+    Bitmap bor null_bitmap_bit(Field, Offset);
+apply_bit(_, _, _, Bitmap) ->
+    Bitmap.
+
+null_bitmap_bit(Field, Offset) ->
+    BytePos = (Field + Offset) div 8,
+    BitPos = (Field + Offset) rem 8,
+    (1 bsl BitPos) bsl (BytePos * 8).
+
+bitmap_bytes(Offset, FieldCount, Bitmap) ->
+    NumBytes = (FieldCount + 7 + Offset) div 8,
+    <<Bitmap:NumBytes/little-unit:8>>.
