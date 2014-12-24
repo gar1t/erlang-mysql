@@ -15,8 +15,11 @@
          decode_packet/1,
          decode_column_definition/1,
          decode_stmt_prepare_resp_packet/1,
-         decode_resultset_row/1,
-         encode_handshake_response/3]).
+         decode_text_resultset_row/1,
+         decode_binary_resultset_row/2,
+         encode_handshake_response/3,
+         encode_null_bitmap/2,
+         is_field_null/3]).
 
 %% Command packets
 -export([com_quit/0,
@@ -26,9 +29,6 @@
          com_stmt_prepare/1,
          com_stmt_execute/2,
          com_stmt_close/1]).
-
-%% Other exports
--export([null_bitmap/2]).
 
 -include("mysql_internal.hrl").
 
@@ -79,12 +79,36 @@
 
 %% Column types
 
--define(TYPE_LONG,     16#03).
--define(TYPE_FLOAT,    16#04).
--define(TYPE_DOUBLE,   16#05).
--define(TYPE_NULL,     16#06).
--define(TYPE_LONGLONG, 16#08).
--define(TYPE_STRING,   16#fe).
+-define(TYPE_DECIMAL,     16#00).
+-define(TYPE_TINY,        16#01).
+-define(TYPE_SHORT,       16#02).
+-define(TYPE_LONG,        16#03).
+-define(TYPE_FLOAT,       16#04).
+-define(TYPE_DOUBLE,      16#05).
+-define(TYPE_NULL,        16#06).
+-define(TYPE_TIMESTAMP,   16#07).
+-define(TYPE_LONGLONG,    16#08).
+-define(TYPE_INT24,       16#09).
+-define(TYPE_DATE,        16#0a).
+-define(TYPE_TIME,        16#0b).
+-define(TYPE_DATETIME,    16#0c).
+-define(TYPE_YEAR,        16#0d).
+-define(TYPE_NEWDATE,     16#0e).
+-define(TYPE_VARCHAR,     16#0f).
+-define(TYPE_BIT,         16#10).
+-define(TYPE_TIMESTAMP2,  16#11).
+-define(TYPE_DATETIME2,   16#12).
+-define(TYPE_TIME2,       16#13).
+-define(TYPE_NEWDECIMAL,  16#f6).
+-define(TYPE_ENUM,        16#f7).
+-define(TYPE_SET,         16#f8).
+-define(TYPE_TINY_BLOB,   16#f9).
+-define(TYPE_MEDIUM_BLOB, 16#fa).
+-define(TYPE_LONG_BLOB,   16#fb).
+-define(TYPE_BLOB,        16#fc).
+-define(TYPE_VAR_STRING,  16#fd).
+-define(TYPE_STRING,      16#fe).
+-define(TYPE_GEOMETRY,    16#ff).
 
 %% ===================================================================
 %% Network
@@ -92,18 +116,33 @@
 
 send_packet(Sock, Seq, Data) ->
     Len = iolist_size(Data),
-    mysql_net:send(Sock, [<<Len:24/little, Seq:8>>, Data]).
+    mysql_net:send(Sock, [<<Len:24/little, Seq>>, Data]).
 
 recv_packet(Sock) ->
     handle_packet_header_recv(mysql_net:recv(Sock, 4), Sock).
 
-handle_packet_header_recv({ok, <<Len:24/little, Seq:8>>}, Sock) ->
+handle_packet_header_recv({ok, <<Len:24/little, Seq>>}, Sock) ->
     handle_packet_payload_recv(mysql_net:recv(Sock, Len), Seq);
 handle_packet_header_recv({error, Err}, _Sock) ->
     {error, Err}.
 
 handle_packet_payload_recv({ok, Packet}, Seq) ->
     {ok, {Seq, Packet}}.
+
+%% ===================================================================
+%% General decoding / encoding support
+%% ===================================================================
+
+apply_decoders([Decoder|Rest], Data0, Acc0) ->
+    {Data, Acc} = Decoder(Data0, Acc0),
+    apply_decoders(Rest, Data, Acc);
+apply_decoders([], _Data, Acc) -> Acc.
+
+apply_encoders([Encoder|Rest], State0, DataAcc0) ->
+    {State, DataAcc} = Encoder(State0, DataAcc0),
+    apply_encoders(Rest, State, DataAcc);
+apply_encoders([], _State, DataAcc) ->
+    lists:reverse(DataAcc).
 
 %% ===================================================================
 %% Handshake decoder
@@ -124,7 +163,7 @@ decode_handshake(Data) ->
          fun hs_auth_plugin_name/2],
     apply_decoders(Decoders, Data, #handshake{}).
 
-hs_protocol_version(<<Ver:8, Rest/binary>>, HS) ->
+hs_protocol_version(<<Ver, Rest/binary>>, HS) ->
     {Rest, HS#handshake{protocol_version=Ver}}.
 
 hs_server_version(Data, HS) ->
@@ -142,7 +181,7 @@ hs_capabilities_low(<<Low:16/little>>, HS) ->
 hs_capabilities_low(<<Low:16/little, Rest/binary>>, HS) ->
     {Rest, HS#handshake{capabilities_low=Low}}.
 
-hs_character_set(<<CharacterSet:8, Rest/binary>>, HS) ->
+hs_character_set(<<CharacterSet, Rest/binary>>, HS) ->
     {Rest, HS#handshake{character_set=CharacterSet}}.
 
 hs_status_flags(<<Flags:16/little, Rest/binary>>, HS) ->
@@ -151,7 +190,7 @@ hs_status_flags(<<Flags:16/little, Rest/binary>>, HS) ->
 hs_capabilities_high(<<High:16/little, Rest/binary>>, HS) ->
     {Rest, HS#handshake{capabilities_high=High}}.
 
-hs_auth_plugin_data_len(<<Len:8, _:10/binary, Rest/binary>>, HS) ->
+hs_auth_plugin_data_len(<<Len, _:10/binary, Rest/binary>>, HS) ->
     {Rest, HS#handshake{auth_plugin_data_len=Len}}.
 
 hs_auth_plugin_data_2(Data, #handshake{auth_plugin_data_len=Len}=HS) ->
@@ -198,7 +237,7 @@ hsr_max_packet_size(State, Data) ->
 
 hsr_character_set(State, Data) ->
     CharacterSet = mysql:get_cfg(default_character_set),
-    {State, [<<CharacterSet:8>>|Data]}.
+    {State, [<<CharacterSet>>|Data]}.
 
 hsr_reserved(State, Data) ->
     {State, [<<0:23/integer-unit:8>>|Data]}.
@@ -209,7 +248,7 @@ hsr_username(#hs_response_state{user=User}=State, Data) ->
 hsr_auth_response(State, Data) ->
     AuthResp = auth_response(State),
     AuthRespLen = size(AuthResp),
-    {State, [<<AuthRespLen:8, AuthResp/binary>>|Data]}.
+    {State, [<<AuthRespLen, AuthResp/binary>>|Data]}.
 
 auth_response(#hs_response_state{handshake=HS, password=Pwd}) ->
     Salt = handshake_salt(HS),
@@ -239,13 +278,22 @@ sha1_xor(H1, H2) ->
 
 %% ===================================================================
 %% Generic packet decoder
+%%
+%% TODO:
+%%
+%% This implementation shows that it's impossible to implement this
+%% functionality as MySQL doesn't use unique headers for each packet
+%% type. The last two cases illustrate this, which are hacks to
+%% leak raw packet data for context-sensitive decoding. We need to
+%% provide all of the various decode_xxx_packet variants to reflect
+%% the true complexity of the protocol.
 %% ===================================================================
 
-decode_packet({Seq, <<?OK_HEADER:8, Data/binary>>}) ->
+decode_packet({Seq, <<?OK_HEADER, Data/binary>>}) ->
     {Seq, ok_packet(Data)};
-decode_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
+decode_packet({Seq, <<?ERR_HEADER, Data/binary>>}) ->
     {Seq, error_packet(Data)};
-decode_packet({Seq, <<?EOF_HEADER:8, Data/binary>>}) ->
+decode_packet({Seq, <<?EOF_HEADER, Data/binary>>}) ->
     {Seq, eof_packet(Data)};
 decode_packet({1, Data}) ->
     {1, init_resultset(Data)};
@@ -355,9 +403,9 @@ col_fixed_length_fields(
   <<16#0c,
     CharacterSet:16/little,
     ColLength:32/little,
-    Type:8,
+    Type,
     Flags:16/little,
-    Decimals:8,
+    Decimals,
     0, 0,
     Rest/binary>>, C) ->
     {Rest, C#coldef{
@@ -374,12 +422,11 @@ col_default_values(Data, C) ->
     {Rest, C#coldef{default_values=Values}}.
 
 %% ===================================================================
-%% Row decoder
+%% Text row decoder
 %% ===================================================================
 
-decode_resultset_row(<<?NULL_HEADER:8>>) -> null;
-decode_resultset_row(Data) ->
-    acc_decoded_strings(Data, []).
+decode_text_resultset_row(Data) ->
+    list_to_tuple(acc_decoded_strings(Data, [])).
 
 acc_decoded_strings(<<>>, Acc) ->
     lists:reverse(Acc);
@@ -388,17 +435,43 @@ acc_decoded_strings(Data, Acc) ->
     acc_decoded_strings(Rest, [Str|Acc]).
 
 %% ===================================================================
-%% Statement response packet decoder
-%%
-%% MySQL cleverly reuses the same packet header for OK and
-%% STMT_PREPARE_OK, even though they're completely different
-%% structures. This variant of decode packet should be used for stmt
-%% prepare responses.
+%% Binary row decoder
 %% ===================================================================
 
-decode_stmt_prepare_resp_packet({Seq, <<?OK_HEADER:8, Data/binary>>}) ->
+decode_binary_resultset_row(Cols, Data) ->
+    {Bitmap, Rest} = decode_null_bitmap(Cols, Data),
+    decode_binary_values(Cols, null_test_fun(Bitmap, 2), Rest).
+
+decode_null_bitmap(Cols, Data) ->
+    BitmapLen = (length(Cols) + 7 + 2) div 8,
+    <<Bitmap:BitmapLen/binary, Rest/binary>> = Data,
+    {Bitmap, Rest}.
+
+null_test_fun(Bitmap, Offset) ->
+    fun(Field) -> is_field_null(Field, Offset, Bitmap) end.
+
+decode_binary_values(Cols, IsNull, Data) ->
+    list_to_tuple(acc_decoded_values(Cols, 0, IsNull, Data, [])).
+
+acc_decoded_values([Col|RestCols], ColPos, IsNull, Data, Values) ->
+    {Value, RestData} = decode_binary_value(IsNull(ColPos), Col, Data),
+    acc_decoded_values(
+      RestCols, ColPos + 1, IsNull, RestData, [Value|Values]);
+acc_decoded_values([], _ColPos, _IsNull, <<>>, Values) ->
+    lists:reverse(Values).
+
+decode_binary_value(_Null=false, #coldef{type=Type}, Data) ->
+    decode_binary_value(Type, Data);
+decode_binary_value(_Null=true, _Col, Data) ->
+    {null, Data}.
+
+%% ===================================================================
+%% Statement prepare response packet decoder
+%% ===================================================================
+
+decode_stmt_prepare_resp_packet({Seq, <<?OK_HEADER, Data/binary>>}) ->
     {Seq, init_prepared_stmt(Data)};
-decode_stmt_prepare_resp_packet({Seq, <<?ERR_HEADER:8, Data/binary>>}) ->
+decode_stmt_prepare_resp_packet({Seq, <<?ERR_HEADER, Data/binary>>}) ->
     {Seq, error_packet(Data)};
 decode_stmt_prepare_resp_packet({Seq, Data}) ->
     {Seq, raw_packet(Data)}.
@@ -407,7 +480,7 @@ init_prepared_stmt(
   <<StmtId:32/little,
     ColCount:16/little,
     ParamCount:16/little,
-    _:8,
+    _Reserved,
     WarningCount:16/little>>) ->
     #prepared_stmt{
        stmt_id=StmtId,
@@ -419,17 +492,17 @@ init_prepared_stmt(
 %% Simple command packets
 %% ===================================================================
 
-com_ping() -> <<?COM_PING:8>>.
+com_ping() -> <<?COM_PING>>.
 
-com_quit() -> <<?COM_QUIT:8>>.
+com_quit() -> <<?COM_QUIT>>.
 
-com_init(Db) -> <<?COM_INIT:8, Db/binary>>.
+com_init(Db) -> <<?COM_INIT, Db/binary>>.
 
-com_query(Query) -> <<?COM_QUERY:8, Query/binary>>.
+com_query(Query) -> <<?COM_QUERY, Query/binary>>.
 
-com_stmt_prepare(Query) -> <<?COM_STMT_PREPARE:8, Query/binary>>.
+com_stmt_prepare(Query) -> <<?COM_STMT_PREPARE, Query/binary>>.
 
-com_stmt_close(StmtId) -> <<?COM_STMT_CLOSE:8, StmtId:32/little>>.
+com_stmt_close(StmtId) -> <<?COM_STMT_CLOSE, StmtId:32/little>>.
 
 %% ===================================================================
 %% Stmt execute packet
@@ -451,11 +524,11 @@ init_stmt_exec_state(#prepared_stmt{stmt_id=StmtId, params=Params}, Values) ->
        values=Values}.
 
 stmt_exec_head(#stmt_exec_state{stmt_id=StmtId}=State, Data) ->
-    Head = <<?COM_STMT_EXECUTE:8, StmtId:32/little, 0:8, 1:32/little>>,
+    Head = <<?COM_STMT_EXECUTE, StmtId:32/little, 0, 1:32/little>>,
     {State, [Head|Data]}.
 
 stmt_exec_null_bitmap(#stmt_exec_state{values=Values}=State, Data) ->
-    {State, [null_bitmap(0, Values)|Data]}.
+    {State, [encode_null_bitmap(0, Values)|Data]}.
 
 stmt_exec_new_params_bound_flag(State, Data) ->
     {State, [<<1>>|Data]}.
@@ -463,6 +536,10 @@ stmt_exec_new_params_bound_flag(State, Data) ->
 stmt_exec_params(#stmt_exec_state{values=Values}=Stmt, Data) ->
     {EncodedTypes, EncodedVals} = encode_params(Values),
     {Stmt, [EncodedVals, EncodedTypes|Data]}.
+
+%% ===================================================================
+%% Parameter encoding
+%% ===================================================================
 
 encode_params(Values) ->
     encode_params(Values, [], []).
@@ -475,21 +552,33 @@ encode_params([], EncTypes, EncVals) ->
 
 encode_param(I) when is_integer(I) ->
     encode_integer_param(I);
+encode_param(Str) when is_binary(Str) orelse is_list(Str) ->
+    encode_string_param(Str);
 encode_param(F) when is_float(F) ->
     encode_float_param(F);
 encode_param(null) ->
-    {<<16#06, 0>>, <<>>}.
+    encode_null_param();
+encode_param(Timestamp) when is_tuple(Timestamp) ->
+    encode_timestamp_param(Timestamp).
 
 encode_integer_param(I) when I =< 16#ffffffff ->
     {<<?TYPE_LONG, 0>>, <<I:32/little>>};
 encode_integer_param(I) when I =< 16#ffffffffffffffff ->
     {<<?TYPE_LONGLONG, 0>>, <<I:64/little>>}.
 
+encode_string_param(S) ->
+    {<<?TYPE_VAR_STRING, 0>>, encode_string(S)}.
+
+encode_null_param() -> {<<16#06, 0>>, <<>>}.
+
 encode_float_param(F) ->
     {<<?TYPE_DOUBLE, 0>>, <<F:64/little-float>>}.
 
+encode_timestamp_param(TS) ->
+    {<<?TYPE_TIMESTAMP, 0>>, encode_timestamp(TS)}.
+
 %% ===================================================================
-%% Helpers
+%% Null terminated strings
 %% ===================================================================
 
 asciiz(Data) ->
@@ -506,23 +595,46 @@ maybe_strip_null(Str) ->
         [Str] -> Str
     end.
 
-apply_decoders([Decoder|Rest], Data0, Acc0) ->
-    {Data, Acc} = Decoder(Data0, Acc0),
-    apply_decoders(Rest, Data, Acc);
-apply_decoders([], _Data, Acc) -> Acc.
+%% ===================================================================
+%% Length encoded integer decoder
+%% ===================================================================
 
-apply_encoders([Encoder|Rest], State0, DataAcc0) ->
-    {State, DataAcc} = Encoder(State0, DataAcc0),
-    apply_encoders(Rest, State, DataAcc);
-apply_encoders([], _State, DataAcc) ->
-    lists:reverse(DataAcc).
-
-decode_integer(<<I:8/integer,        Rest/binary>>) when I < 251 -> {I, Rest};
+decode_integer(<<I/integer, Rest/binary>>) when I < 251 -> {I, Rest};
 decode_integer(<<16#fc, I:16/little, Rest/binary>>) -> {I, Rest};
 decode_integer(<<16#fd, I:24/little, Rest/binary>>) -> {I, Rest};
-decode_integer(<<16#fe, I:32/little, Rest/binary>>) -> {I, Rest}.
+decode_integer(<<16#fe, I:64/little, Rest/binary>>) -> {I, Rest}.
 
-decode_string(<<16#fb, Rest/binary>>) ->
+%% ===================================================================
+%% Fixed length integer decoder
+%% ===================================================================
+
+decode_integer(Len, Data) ->
+    <<I:Len/little-signed, Rest/binary>> = Data,
+    {I, Rest}.
+
+%% ===================================================================
+%% Length encoded integer encoder
+%% ===================================================================
+
+encode_integer(I) when I < 251 -> <<I>>;
+encode_integer(I) when I =< 16#ffff -> <<16#fc, I:16/little>>;
+encode_integer(I) when I =< 16#ffffff -> <<16#fd, I:24/little>>;
+encode_integer(I) when I =< 16#ffffffffffffffff -> <<16#fe, I:64/little>>;
+encode_integer(I) -> error({integer_too_big, I}).
+
+%% ===================================================================
+%% Fixed length float decoder
+%% ===================================================================
+
+decode_float(Len, Data) ->
+    <<F:Len/little-signed-float, Rest/binary>> = Data,
+    {F, Rest}.
+
+%% ===================================================================
+%% Length encoded string decoder
+%% ===================================================================
+
+decode_string(<<?NULL_HEADER, Rest/binary>>) ->
     {null, Rest};
 decode_string(Data) ->
     {Len, StrPlusRest} = decode_integer(Data),
@@ -533,14 +645,81 @@ split_at_len(Data, Len) ->
     P2 = binary:part(Data, Len, size(Data) - Len),
     {P1, P2}.
 
-null_bitmap(Offset, Values) ->
-    null_bitmap(Values, Offset, 0, 0).
+%% ===================================================================
+%% Length encoded string encoder
+%% ===================================================================
 
-null_bitmap([Val|Rest], Offset, Field, Bitmap) ->
-    null_bitmap(
+encode_string(Str) ->
+    StrBin = iolist_to_binary(Str),
+    Len = encode_integer(size(StrBin)),
+    <<Len/binary, StrBin/binary>>.
+
+%% ===================================================================
+%% Timestamp decoder
+%%
+%% TODO: We're discarding the microsecond component here to
+%% stay within the calendar module's datetime type. This is a problem
+%% obviously. See README for notes on this.
+%% ===================================================================
+
+decode_timestamp(<<0, Data/binary>>) ->
+    {{{0, 0, 0}, {0, 0, 0}}, Data};
+decode_timestamp(<<4, Data/binary>>) ->
+    <<Year:16/little, Month, Day, Rest/binary>> = Data,
+    {{{Year, Month, Day}, {0, 0, 0}}, Rest};
+decode_timestamp(<<7, Data/binary>>) ->
+    <<Year:16/little, Month, Day,
+      Hour, Minute, Second, Rest/binary>> = Data,
+    {{{Year, Month, Day}, {Hour, Minute, Second}}, Rest};
+decode_timestamp(<<11, Data/binary>>) ->
+    <<Year:16/little, Month, Day,
+      Hour, Minute, Second, _Micro:32/little,
+      Rest/binary>> = Data,
+    {{{Year, Month, Day}, {Hour, Minute, Second}}, Rest}.
+
+%% ===================================================================
+%% Timestamp encoder
+%% ===================================================================
+
+encode_timestamp({_, _, Micro}=TS) ->
+    {{Year, Mon, Day}, {Hour, Min, Sec}} = calendar:now_to_datetime(TS),
+    encode_timestamp({{Year, Mon, Day}, {Hour, Min, Sec, Micro}});
+encode_timestamp({{Year, Mon, Day}, {Hour, Min, Sec}}) ->
+    <<7, Year:16/little, Mon, Day, Hour, Min, Sec>>;
+encode_timestamp({{Year, Mon, Day}, {Hour, Min, Sec, Micro}}) ->
+    <<11, Year:16/little, Mon, Day, Hour, Min, Sec, Micro:32/little>>.
+
+%% ===================================================================
+%% Time decoder
+%% ===================================================================
+
+decode_time(Data) ->
+    <<Len, Rest/binary>> = Data,
+    decode_time(Len, Rest).
+
+decode_time(0, Data) ->
+    {{0, 0, 0, 0, 0, 0}, Data};
+decode_time(8, Data) ->
+    <<IsNegative:1, Days:32/little, Hours,
+      Minutes, Seconds, Rest/binary>> = Data,
+    {{IsNegative, Days, Hours, Minutes, Seconds, 0}, Rest};
+decode_time(12, Data) ->
+    <<IsNegative:1, Days:32/little, Hours,
+      Minutes, Seconds, Micro:32/little, Rest/binary>> = Data,
+    {{IsNegative, Days, Hours, Minutes, Seconds, Micro}, Rest}.
+
+%% ===================================================================
+%% NULL bitmap encoder
+%% ===================================================================
+
+encode_null_bitmap(Offset, Values) ->
+    encode_null_bitmap(Values, Offset, 0, 0).
+
+encode_null_bitmap([Val|Rest], Offset, Field, Bitmap) ->
+    encode_null_bitmap(
       Rest, Offset, Field + 1,
       apply_bit(Val, Field, Offset, Bitmap));
-null_bitmap([], Offset, FieldCount, Bitmap) ->
+encode_null_bitmap([], Offset, FieldCount, Bitmap) ->
     bitmap_bytes(Offset, FieldCount, Bitmap).
 
 apply_bit(null, Field, Offset, Bitmap) ->
@@ -556,3 +735,43 @@ null_bitmap_bit(Field, Offset) ->
 bitmap_bytes(Offset, FieldCount, Bitmap) ->
     NumBytes = (FieldCount + 7 + Offset) div 8,
     <<Bitmap:NumBytes/little-unit:8>>.
+
+%% ===================================================================
+%% NULL bitmap decode support
+%% ===================================================================
+
+is_field_null(Field, Offset, Bitmap) ->
+    BytePos = (Field + Offset) div 8,
+    Byte = binary:at(Bitmap, BytePos),
+    BitPos = (Field + Offset) rem 8,
+    Byte band (1 bsl BitPos) /= 0.
+
+%% ===================================================================
+%% Binary value decoder
+%% ===================================================================
+
+decode_binary_value(?TYPE_DECIMAL, Data)     -> decode_string(Data);
+decode_binary_value(?TYPE_TINY, Data)        -> decode_integer(8, Data);
+decode_binary_value(?TYPE_SHORT, Data)       -> decode_integer(16, Data);
+decode_binary_value(?TYPE_LONG, Data)        -> decode_integer(32, Data);
+decode_binary_value(?TYPE_FLOAT, Data)       -> decode_float(32, Data);
+decode_binary_value(?TYPE_DOUBLE, Data)      -> decode_float(64, Data);
+decode_binary_value(?TYPE_TIMESTAMP, Data)   -> decode_timestamp(Data);
+decode_binary_value(?TYPE_LONGLONG, Data)    -> decode_integer(16, Data);
+decode_binary_value(?TYPE_INT24, Data)       -> decode_integer(32, Data);
+decode_binary_value(?TYPE_DATE, Data)        -> decode_timestamp(Data);
+decode_binary_value(?TYPE_TIME, Data)        -> decode_time(Data);
+decode_binary_value(?TYPE_DATETIME, Data)    -> decode_timestamp(Data);
+decode_binary_value(?TYPE_YEAR, Data)        -> decode_integer(16, Data);
+decode_binary_value(?TYPE_VARCHAR, Data)     -> decode_string(Data);
+decode_binary_value(?TYPE_BIT, Data)         -> decode_string(Data);
+decode_binary_value(?TYPE_NEWDECIMAL, Data)  -> decode_string(Data);
+decode_binary_value(?TYPE_ENUM, Data)        -> decode_string(Data);
+decode_binary_value(?TYPE_SET, Data)         -> decode_string(Data);
+decode_binary_value(?TYPE_TINY_BLOB, Data)   -> decode_string(Data);
+decode_binary_value(?TYPE_MEDIUM_BLOB, Data) -> decode_string(Data);
+decode_binary_value(?TYPE_LONG_BLOB, Data)   -> decode_string(Data);
+decode_binary_value(?TYPE_BLOB, Data)        -> decode_string(Data);
+decode_binary_value(?TYPE_VAR_STRING, Data)  -> decode_string(Data);
+decode_binary_value(?TYPE_STRING, Data)      -> decode_string(Data);
+decode_binary_value(?TYPE_GEOMETRY, Data)    -> decode_string(Data).

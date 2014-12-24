@@ -286,3 +286,71 @@ I'm inclined to stick with the limitation of a simple three-element record.
 
 We should use the atom `null` to represent NULL (as opposed to `nil`,
 `undefined`, etc).
+
+## Time
+
+We need to officially support microsecond components of timestamp
+values. What's the right way to do this in Erlang? The erlang:now/0 type
+supports this, but there's a cost to convert from the database format, which is
+is more likely to resemble the calendar datetime format.
+
+Making this a TODO for now.
+
+# To Do
+
+## Evaluate mysql_lib for protocol logic and move to mysql_protocol
+
+`mysql_lib` is meant to be a higher level interface to MySQL that coordinates
+network (`mysql_net`) and protocol encoding/decoding (`mysql_protocol`). The
+cross packet decoding that it does currently should probably be in
+`mysql_protocol`. The protocol itself could be made easier to follow if it
+surfaced as a series of receiever/decode functions that were applied along with
+a `next_packet` or `recv` callback (to decouple the network function).
+
+## Move network access out of `mysql_protocol`
+
+The direct use of `mysql_net` in `mysql_protocol` is not really that great. The
+idea of the protocol module is to be a pure encoder/decoder with zero coupling
+to the network interface. A good measure of decoupling here is to make
+everything in that module testable.
+
+Direct tests would be a good illustration of the protocol use as well.
+
+Another example where the protocol leaks out of `mysql_protocol` is
+`mysql_lib:recv_execute_resp_rows` which is forced to work with raw packet data
+(MySQL likes to reuse the OK header 16#00 in other cases, making it impossible
+to define a context-free set of packet decoders).
+
+## Cursor based row retrieval
+
+We can use cursors with MySQL via the prepared statement protocol:
+
+Setting the cursor:
+
+http://dev.mysql.com/doc/internals/en/com-stmt-execute.html
+
+Retrieving results:
+
+http://dev.mysql.com/doc/internals/en/com-stmt-fetch.html
+
+## Finalize timestamp format
+
+Options:
+
+1. Use erlang:now/0 type: {MegaSeconds, Seconds, MicroSeconds}
+2. Use calendar datetime: {{Year, Month, Day}, {Hour, Min, Sec}}
+
+Option 1 doesn't support dates before 1970, so I think we have to strike this.
+
+Option 2 doesn't support microseconds.
+
+Adding a fourth element to the time tuple is a bit strange and would make
+working with this type a real pain.
+
+The seconds element could optionally be a float, but this feels like it could
+lose precision (maybe false?)
+
+Note that the MySQL implementation accepts both formats in (options 1 and 2)
+but only provides option 2 out (not including the microsecond component - this
+isn't coming back from MySQL for some reason - either a bug on our side or not
+using the right type or precision).

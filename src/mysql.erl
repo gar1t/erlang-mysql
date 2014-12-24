@@ -57,8 +57,10 @@ execute(Db, Query) ->
     dbapi_result(mysql_lib:query(Db, iolist_to_binary(Query))).
 
 execute(Db, Stmt, Params) ->
-    %% TODO: dbapi resultify this
-    mysql_lib:execute_statement(Db, Stmt, Params).
+    dbapi_result(mysql_lib:execute_statement(Db, Stmt, Params)).
+
+%% TODO: execute(Db, Stmt, Params, Options) to enable cursor based row
+%% retrieval
 
 describe(#resultset{}=RS) ->
     describe_resultset(RS);
@@ -73,6 +75,8 @@ describe(#ok_packet{affected_rows=Rows}, rowcount) ->
     Rows;
 describe(#resultset{columns=Cols}, column_names) ->
     [C#coldef.name || C <- Cols];
+describe(#resultset{columns=Cols}, column_types) ->
+    [dbapi_type(C#coldef.type) || C <- Cols];
 describe(Term, Name) ->
     %% TODO: continue to optimize here - this is a catchall
     proplists:get_value(Name, describe(Term)).
@@ -80,6 +84,8 @@ describe(Term, Name) ->
 rows(#resultset{rows=Rows}) -> Rows;
 rows(#ok_packet{}) -> [].
 
+%% TODO: We can implement proper cursor-based row retrieval, optionally,
+%% if we're working with a prepared statement.
 next(#resultset{rows=[Row|Rest]}=RS) ->
     {Row, RS#resultset{rows=Rest}};
 next(#resultset{rows=[]}) -> eof;

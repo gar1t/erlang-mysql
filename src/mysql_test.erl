@@ -7,7 +7,8 @@
 -define(TESTS,
         [fun ping_server/0,
          fun insert_select/0,
-         fun null_bitmap/0]).
+         fun null_bitmap/0,
+         fun prepared_statements/0]).
 
 %% ===================================================================
 %% Run tests
@@ -43,35 +44,57 @@ insert_select() ->
     %% Create a table we can insert into
     {ok, _} = mysql:execute(Db, "use test"),
     {ok, _} = mysql:execute(Db, "drop table if exists __t"),
-    {ok, _} = mysql:execute(Db, "create table __t (i int)"),
+    {ok, _} = mysql:execute(Db, "create table __t (i int, s varchar(100))"),
 
-    %% Insert returns a result that tells us what happened
-    {ok, I1} = mysql:execute(Db, "insert into __t values (1)"),
-    1 = mysql:describe(I1, rowcount),
-    0 = mysql:describe(I1, warnings),
-    2 = mysql:describe(I1, status),
-    <<>> = mysql:describe(I1, info),
+    %% Insert a row into our table
+    {ok, R1} = mysql:execute(Db, "insert into __t values (1, 'Dog')"),
+
+    %% The result of an insert gives us some information
+    [{rowcount, 1},
+     {status, 2},
+     {warnings, 0},
+     {info, <<>>}] = mysql:describe(R1),
+
+    %% We can get specific attributes directly using describe/2
+    1 = mysql:describe(R1, rowcount),
+    0 = mysql:describe(R1, warnings),
+    2 = mysql:describe(R1, status),
+    <<>> = mysql:describe(R1, info),
 
     %% Insert some more values
-    {ok, _} = mysql:execute(Db, "insert into __t values (2)"),
-    {ok, _} = mysql:execute(Db, "insert into __t values (3)"),
+    {ok, _} = mysql:execute(Db, "insert into __t values (2, 'Cat')"),
+    {ok, _} = mysql:execute(Db, "insert into __t values (3, 'Lemur')"),
 
     %% Select returns a resultset that contains the rows
-    {ok, RS} = mysql:execute(Db, "select * from __t order by i"),
-    [{<<"1">>},
-     {<<"2">>},
-     {<<"3">>}] = mysql:rows(RS),
+    {ok, R2} = mysql:execute(Db, "select * from __t order by i"),
+    [{<<"1">>, <<"Dog">>},
+     {<<"2">>, <<"Cat">>},
+     {<<"3">>, <<"Lemur">>}] = mysql:rows(R2),
 
     %% Note at this time the driver does *not* convert values to their
     %% native Erlang type - these are returned by the MySQL as strings
     %% and are preserved as such.
 
-    %% We can get information about the result set.
-    [<<"i">>] = mysql:describe(RS, column_names),
+    %% Like the insert result, we can get info about a select result
+    [{rowcount, 3}, {columns, Cols}] = mysql:describe(R2),
+
+    %% The columns attribute contains information about each of the
+    %% collumns returned in the resulset
+    2 = length(Cols),
+    [long, var_string] = map_attr(type, Cols),
+    [<<"i">>, <<"s">>] = map_attr(name, Cols),
+
+    %% There are shortcuts for getting some of the attributes directly
+    3 = mysql:describe(R2, rowcount),
+    [long, var_string] = mysql:describe(R2, column_types),
+    [<<"i">>, <<"s">>] = mysql:describe(R2, column_names),
 
     ok = mysql:close(Db),
 
     io:format("OK~n").
+
+map_attr(Name, List) ->
+    [proplists:get_value(Name, Item) || Item <- List].
 
 %% ===================================================================
 %% Null bitmap
@@ -82,52 +105,98 @@ insert_select() ->
 null_bitmap() ->
     io:format("null_bitmap: "),
 
-    NB = fun(Offset, Vals) -> mysql_protocol:null_bitmap(Offset, Vals) end,
-
-    %% For some inexplicable reason, the prepared statement binary protocol
-    %% uses a so called NULL bitmap to represent null field values. This is
-    %% used in addition to a NULL value type - the two need to be in sync. The
-    %% argument is that "If many NULL values are sent, it is more efficient
-    %% than the old way". Apparently the handful of bits saved in these edge
-    %% cases is worth the CPU cycles needed to encode and decode them. Oh,
-    %% except for the use of the NULL type _byte_ - wait, no, that's _two_
-    %% bytes as the value type includes an extra byte (yes, eight more precious
-    %% bits) to flag an unsigned value -- both of which are _required in all
-    %% cases, even when a value is NULL_.
-    %%
-    %% If this wasn't the actual behavior that we have to accomodate, it'd be a
-    %% sick, twisted, hilarious troll.
-    %%
-    %% So... these tests illustrate what's required of us. Getting our big boy
-    %% pants on...
+    Enc = fun mysql_protocol:encode_null_bitmap/2,
 
     %% Each null value gets a bit in its respective field location:
 
-    <<2#00000001>> = NB(0, [null]),
-    <<2#00000011>> = NB(0, [null, null]),
-    <<2#00000101>> = NB(0, [null, 0, null]),
-    <<2#00000101>> = NB(0, [null, 0, null]),
-    <<2#00011010>> = NB(0, [0, null, 0, null, null]),
-    <<2#10000000>> = NB(0, [0, 0, 0, 0, 0, 0, 0, null]),
+    <<2#00000001>> = Enc(0, [null]),
+    <<2#00000011>> = Enc(0, [null, null]),
+    <<2#00000101>> = Enc(0, [null, 0, null]),
+    <<2#00000101>> = Enc(0, [null, 0, null]),
+    <<2#00011010>> = Enc(0, [0, null, 0, null, null]),
+    <<2#10000000>> = Enc(0, [0, 0, 0, 0, 0, 0, 0, null]),
 
     %% We add another little byte as needed to accommodate more fields.
 
-    <<2#00000000, 2#00000001>> = NB(0, [0, 0, 0, 0, 0, 0, 0, 0,
-                                        null]),
-    <<2#00000001, 2#00000001>> = NB(0, [null, 0, 0, 0, 0, 0, 0, 0,
-                                        null]),
-    <<2#11100000, 2#00000111>> = NB(0, [0, 0, 0, 0, 0, null, null, null,
-                                        null, null, null]),
-    <<2#01010101, 2#01010101>> = NB(0, [null, 0, null, 0, null, 0, null, 0,
-                                        null, 0, null, 0, null, 0, null, 0]),
+    <<2#00000000, 2#00000001>> = Enc(0, [0, 0, 0, 0, 0, 0, 0, 0,
+                                         null]),
+    <<2#00000001, 2#00000001>> = Enc(0, [null, 0, 0, 0, 0, 0, 0, 0,
+                                         null]),
+    <<2#11100000, 2#00000111>> = Enc(0, [0, 0, 0, 0, 0, null, null, null,
+                                         null, null, null]),
+    <<2#01010101, 2#01010101>> = Enc(0, [null, 0, null, 0, null, 0, null, 0,
+                                         null, 0, null, 0, null, 0, null, 0]),
 
     %% Offset shifts the bits to the left
 
-    <<2#00000010>> = NB(1, [null]),
-    <<2#00000110>> = NB(1, [null, null]),
-    <<2#00001010>> = NB(1, [null, 0, null]),
-    <<2#00001010>> = NB(1, [null, 0, null]),
-    <<2#00110100>> = NB(1, [0, null, 0, null, null]),
-    <<2#00000000, 2#00000001>> = NB(1, [0, 0, 0, 0, 0, 0, 0, null]),
+    <<2#00000010>> = Enc(1, [null]),
+    <<2#00000110>> = Enc(1, [null, null]),
+    <<2#00001010>> = Enc(1, [null, 0, null]),
+    <<2#00001010>> = Enc(1, [null, 0, null]),
+    <<2#00110100>> = Enc(1, [0, null, 0, null, null]),
+    <<2#00000000, 2#00000001>> = Enc(1, [0, 0, 0, 0, 0, 0, 0, null]),
 
-    io:format("ok~n").
+    %% When reading a bitmap provided by the MySQL server, we use
+    %% is_field_null to test for a null bit for a field (0 based).
+
+    Null = fun mysql_protocol:is_field_null/3,
+    Bitmap = <<2#01010101, 2#00000011>>,
+
+    true  = Null(0, 0, Bitmap),
+    false = Null(1, 0, Bitmap),
+    true  = Null(2, 0, Bitmap),
+    false = Null(3, 0, Bitmap),
+    true  = Null(4, 0, Bitmap),
+    false = Null(5, 0, Bitmap),
+    true  = Null(6, 0, Bitmap),
+    false = Null(7, 0, Bitmap),
+    true  = Null(8, 0, Bitmap),
+    true  = Null(9, 0, Bitmap),
+    false = Null(10, 0, Bitmap),
+    false = Null(11, 0, Bitmap),
+
+    io:format("OK~n").
+
+%% ===================================================================
+%% Prepare statement
+%% ===================================================================
+
+prepared_statements() ->
+    io:format("prepared_statements: "),
+
+    {ok, Db} = mysql:connect([]),
+
+    %% Create a table we can insert into
+    {ok, _} = mysql:execute(Db, "use test"),
+    {ok, _} = mysql:execute(Db, "drop table if exists __t"),
+    CreateTableSQL =
+        "create table __t ("
+        " i int,"
+        " f double,"
+        " s varchar(100),"
+        " t timestamp,"
+        " b blob)",
+    {ok, _} = mysql:execute(Db, CreateTableSQL),
+
+    %% Create a prepared statement that inserts a row
+    {ok, Insert} = mysql:prepare(Db, "insert into __t values (?, ?, ?, ?, ?)"),
+
+    %% Execute the statement by passing along native parameter values
+    Now = calendar:local_time(),
+    P1 = [1, 1.12345, "Hello", Now, <<1,2,3,4>>],
+    P2 = [2, null, "Goodbye", Now, null],
+
+    {ok, _} = mysql:execute(Db, Insert, P1),
+    {ok, _} = mysql:execute(Db, Insert, P2),
+
+    %% Create a select statement
+    {ok, Select} = mysql:prepare(Db, "select * from __t where i > ?"),
+
+    %% Use select in the same way
+    {ok, R1} = mysql:execute(Db, Select, [0]),
+    [{1, 1.12345, <<"Hello">>, Now, <<1,2,3,4>>},
+     {2, null, <<"Goodbye">>, Now, null}] = mysql:rows(R1),
+
+    ok = mysql:close(Db),
+
+    io:format("OK~n").

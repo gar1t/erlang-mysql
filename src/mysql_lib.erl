@@ -90,6 +90,14 @@ decode_packet(Packet) ->
     mysql_protocol:decode_packet(Packet).
 
 %% ===================================================================
+%% Muti-part recv support
+%% ===================================================================
+
+apply_recv_parts([Recv|Rest], Sock, Acc) ->
+    apply_recv_parts(Rest, Sock, Recv(Sock, Acc));
+apply_recv_parts([], _, Acc) -> Acc.
+
+%% ===================================================================
 %% Query
 %% ===================================================================
 
@@ -104,9 +112,19 @@ recv_query_resp(Sock) ->
 handle_query_resp_first_packet({1, #ok_packet{}=OK}, _Sock) ->
     OK;
 handle_query_resp_first_packet({1, #resultset{}=RS}, Sock) ->
-    recv_query_resp_columns(Sock, RS);
+    recv_query_resp_resultset(Sock, RS);
 handle_query_resp_first_packet({1, #err_packet{}=Err}, _Sock) ->
     Err.
+
+recv_query_resp_resultset(Sock, RS) ->
+    Parts =
+        [fun recv_query_resp_columns/2,
+         fun recv_query_resp_rows/2],
+    apply_recv_parts(Parts, Sock, RS).
+
+%% ===================================================================
+%% Receive column definitions into resultset
+%% ===================================================================
 
 recv_query_resp_columns(Sock, RS) ->
     Packet = recv_decoded_packet(Sock),
@@ -116,8 +134,8 @@ handle_query_resp_column({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
     ColDef = mysql_protocol:decode_column_definition(Data),
     Packet = recv_decoded_packet(Sock),
     handle_query_resp_column(Packet, Sock, add_rs_column(ColDef, RS));
-handle_query_resp_column({_Seq, #eof_packet{}}, Sock, RS) ->
-    recv_query_resp_rows(Sock, finalize_rs_columns(RS)).
+handle_query_resp_column({_Seq, #eof_packet{}}, _Sock, RS) ->
+    finalize_rs_columns(RS).
 
 add_rs_column(Col, #resultset{columns=Cols}=RS) ->
     RS#resultset{columns=[Col|Cols]}.
@@ -125,19 +143,23 @@ add_rs_column(Col, #resultset{columns=Cols}=RS) ->
 finalize_rs_columns(#resultset{columns=Cols}=RS) ->
     RS#resultset{columns=lists:reverse(Cols)}.
 
+%% ===================================================================
+%% Receive text resultset rows
+%% ===================================================================
+
 recv_query_resp_rows(Sock, RS) ->
     Packet = recv_decoded_packet(Sock),
     handle_query_resp_row(Packet, Sock, RS).
 
 handle_query_resp_row({_Seq, #raw_packet{data=Data}}, Sock, RS) ->
-    Row = mysql_protocol:decode_resultset_row(Data),
+    Row = mysql_protocol:decode_text_resultset_row(Data),
     Packet = recv_decoded_packet(Sock),
     handle_query_resp_row(Packet, Sock, add_row(Row, RS));
 handle_query_resp_row({_Seq, #eof_packet{}}, _Sock, RS) ->
     finalize_rows(RS).
 
 add_row(Row, #resultset{rows=Rows}=RS) ->
-    RS#resultset{rows=[list_to_tuple(Row)|Rows]}.
+    RS#resultset{rows=[Row|Rows]}.
 
 finalize_rows(#resultset{rows=Rows}=RS) ->
     RS#resultset{rows=lists:reverse(Rows)}.
@@ -205,8 +227,54 @@ finalize_stmt_cols(#prepared_stmt{columns=Cols}=Stmt) ->
 %% ===================================================================
 
 execute_statement(#mysql{sock=Sock}, Stmt, Values) ->
+    %% TODO: We'd need to set a flag for the execute command to enable
+    %% cursor/row-base retrieval.
     send_packet(Sock, 0, mysql_protocol:com_stmt_execute(Stmt, Values)),
-    recv_decoded_packet(Sock).
+    recv_execute_resp(Sock).
+
+recv_execute_resp(Sock) ->
+    Packet = recv_decoded_packet(Sock),
+    handle_execute_resp_first_packet(Packet, Sock).
+
+handle_execute_resp_first_packet({1, #ok_packet{}=OK}, _Sock) ->
+    OK;
+handle_execute_resp_first_packet({1, #resultset{}=RS}, Sock) ->
+    recv_execute_resp_resultset(Sock, RS);
+handle_execute_resp_first_packet({1, #err_packet{}=Err}, _Sock) ->
+    Err.
+
+recv_execute_resp_resultset(Sock, RS) ->
+    %% TODO: If we're using cursors, we must skip the rows part.
+    Parts =
+        [fun recv_query_resp_columns/2,
+         fun recv_execute_resp_rows/2],
+    apply_recv_parts(Parts, Sock, RS).
+
+%% ===================================================================
+%% Receive binary resulset rows
+%% ===================================================================
+
+recv_execute_resp_rows(Sock, RS) ->
+    %% MySQL uses the same header for the binary resultset row as
+    %% they do for OK, so there's no way to reuse generic decoding
+    %% here. We need to work with the raw packets. This needs to
+    %% land in mysql_protocol.
+    %%
+    %% TODO: replace with mysql_protocol:decode_xxx_packet, which
+    %% would apply the correct decoding for the xxx context (xxx
+    %% in this case would be something like binary_resulset_row).
+    %%
+    Packet = recv_packet(Sock),
+    handle_execute_resp_row(Packet, Sock, RS).
+
+handle_execute_resp_row({_Seq, <<16#fe, _:16, _:16>>}, _Sock, RS) ->
+    % eof header
+    finalize_rows(RS);
+handle_execute_resp_row({_Seq, <<0, Data/binary>>}, Sock,
+                        #resultset{columns=Cols}=RS) ->
+    Row = mysql_protocol:decode_binary_resultset_row(Cols, Data),
+    Packet = recv_packet(Sock),
+    handle_execute_resp_row(Packet, Sock, add_row(Row, RS)).
 
 %% ===================================================================
 %% Close statement
