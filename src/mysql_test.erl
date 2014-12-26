@@ -1,33 +1,103 @@
 -module(mysql_test).
 
--export([run_all/0]).
+-export([run_all/0, run_all/1, run_all_cli/0]).
 
 -include("dbapi.hrl").
 
+-define(DEFAULT_HOST, "localhost").
+-define(DEFAULT_PORT, 3306).
+-define(DEFAULT_USER, "").
+-define(DEFAULT_PASSWORD, "").
+-define(DEFAULT_DATABASE, "test").
+
 -define(TESTS,
-        [fun ping_server/0,
-         fun insert_select/0,
-         fun null_bitmap/0,
-         fun prepared_statements/0]).
+        [fun ping_server/1,
+         fun init_db/1,
+         fun insert_select/1,
+         fun null_bitmap/1,
+         fun prepared_statements/1]).
 
 %% ===================================================================
 %% Run tests
 %% ===================================================================
 
 run_all() ->
-    lists:foreach(fun run_test/1, ?TESTS).
+    run_all(
+      maybe_env_opts(
+        [{"MYSQL_TEST_HOST", host},
+         {"MYSQL_TEST_PORT", port},
+         {"MYSQL_TEST_USER", user},
+         {"MYSQL_TEST_PASSWORD", password},
+         {"MYSQL_TEST_DATABASE", database}])).
 
-run_test(Test) -> Test().
+run_all(Opts) ->
+    lists:foreach(fun(Test) -> Test(Opts) end, ?TESTS).
+
+run_all_cli() ->
+    try
+        run_all()
+    catch
+        _:Err -> print_error_and_exit(Err)
+    end.
+
+print_error_and_exit(Err) ->
+    io:format(standard_error, "ERROR ~p~n", [Err]),
+    io:format(standard_error, "~p~n", [erlang:get_stacktrace()]),
+    erlang:halt(1).
+
+%% ===================================================================
+%% Helpers
+%% ===================================================================
+
+maybe_env_opts(Names) ->
+    maybe_env_opts(Names, []).
+
+maybe_env_opts([{Name, Opt}|Rest], Acc) ->
+    maybe_env_opts(Rest, maybe_env_opt(Name, Opt, Acc));
+maybe_env_opts([], Acc) -> Acc.
+
+maybe_env_opt(Name, Opt, Opts) ->
+    case os:getenv(Name) of
+        false -> Opts;
+        Value -> [{Opt, maybe_int_opt(Opt, Value)}|Opts]
+    end.
+
+maybe_int_opt(port, Value) -> list_to_integer(Value);
+maybe_int_opt(_, Value) -> Value.
+
+connect_opts(Opts) ->
+    [{host, mysql_util:option(host, Opts, ?DEFAULT_HOST)},
+     {port, mysql_util:option(port, Opts, ?DEFAULT_PORT)},
+     {user, mysql_util:option(user, Opts, ?DEFAULT_USER)},
+     {password, mysql_util:option(password, Opts, ?DEFAULT_PASSWORD)}].
+
+test_db_opt(Opts) ->
+    mysql_util:option(database, Opts, ?DEFAULT_DATABASE).
 
 %% ===================================================================
 %% Ping server
 %% ===================================================================
 
-ping_server() ->
+ping_server(Opts) ->
     io:format("ping_server: "),
 
-    {ok, Db} = mysql:connect([]),
+    {ok, Db} = mysql:connect(connect_opts(Opts)),
     ok = mysql:ping(Db),
+    ok = mysql:close(Db),
+
+    io:format("OK~n").
+
+%% ===================================================================
+%% Init db
+%% ===================================================================
+
+init_db(Opts) ->
+    io:format("init_db: "),
+
+    ConnectOpts = [{database, test_db_opt(Opts)}|connect_opts(Opts)],
+    {ok, Db} = mysql:connect(ConnectOpts),
+    {ok, _} = mysql:execute(Db, "show tables"),
+
     ok = mysql:close(Db),
 
     io:format("OK~n").
@@ -36,13 +106,13 @@ ping_server() ->
 %% Insert select
 %% ===================================================================
 
-insert_select() ->
+insert_select(Opts) ->
     io:format("insert_select: "),
 
-    {ok, Db} = mysql:connect([]),
+    {ok, Db} = mysql:connect(connect_opts(Opts)),
 
     %% Create a table we can insert into
-    {ok, _} = mysql:execute(Db, "use test"),
+    {ok, _} = mysql:execute(Db, "use " ++ test_db_opt(Opts)),
     {ok, _} = mysql:execute(Db, "drop table if exists __t"),
     {ok, _} = mysql:execute(Db, "create table __t (i int, s varchar(100))"),
 
@@ -102,7 +172,7 @@ map_attr(Name, List) ->
 %% See http://dev.mysql.com/doc/internals/en/null-bitmap.html
 %% ===================================================================
 
-null_bitmap() ->
+null_bitmap(_Opts) ->
     io:format("null_bitmap: "),
 
     Enc = fun mysql_protocol:encode_null_bitmap/2,
@@ -161,13 +231,13 @@ null_bitmap() ->
 %% Prepare statement
 %% ===================================================================
 
-prepared_statements() ->
+prepared_statements(Opts) ->
     io:format("prepared_statements: "),
 
-    {ok, Db} = mysql:connect([]),
+    {ok, Db} = mysql:connect(Opts),
 
     %% Create a table we can insert into
-    {ok, _} = mysql:execute(Db, "use test"),
+    {ok, _} = mysql:execute(Db, "use " ++ test_db_opt(Opts)),
     {ok, _} = mysql:execute(Db, "drop table if exists __t"),
     CreateTableSQL =
         "create table __t ("

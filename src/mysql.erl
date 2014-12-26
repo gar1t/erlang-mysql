@@ -44,14 +44,22 @@ start() ->
 
 %% TODO: Hard coded values for now - implement app config
 get_cfg(max_allowed_packet) -> 100 * 1024 * 1024;
-get_cfg(default_character_set) -> 0. %% TODO try 0
+get_cfg(default_character_set) -> 0.
 
 %% ===================================================================
 %% DB API
 %% ===================================================================
 
-connect(_Options) ->
-    mysql_lib:connect([]).
+connect(Options) ->
+    mysql_lib:connect(validate_connect_options(Options)).
+
+validate_connect_options(Options) ->
+    [validate_connect_option(Opt) || Opt <- Options].
+
+validate_connect_option({user, User})    -> {user, iolist_to_binary(User)};
+validate_connect_option({password, Pwd}) -> {password, iolist_to_binary(Pwd)};
+validate_connect_option({database, Db})  -> {database, iolist_to_binary(Db)};
+validate_connect_option(Opt)             -> Opt.
 
 execute(Db, Query) ->
     dbapi_result(mysql_lib:query(Db, iolist_to_binary(Query))).

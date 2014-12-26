@@ -15,7 +15,8 @@
          prepare_statement/2,
          execute_statement/3,
          close_statement/2,
-         ping/1]).
+         ping/1,
+         init_db/2]).
 
 -include("mysql_internal.hrl").
 
@@ -29,24 +30,65 @@
 %% Connect
 %% ===================================================================
 
+-record(connect_state,
+        {host,
+         port,
+         user,
+         password,
+         timeout,
+         database,
+         sock}).
+
 connect(Options) ->
-    Host = mysql_util:option(host, Options, ?DEFAULT_HOST),
-    Port = mysql_util:option(port, Options, ?DEFAULT_PORT),
-    User = mysql_util:option(user, Options, ?DEFAULT_USER),
-    Pwd = mysql_util:option(password, Options, ?DEFAULT_PWD),
-    Timeout = mysql_util:option(timeout, Options, ?DEFAULT_CONNECT_TIMEOUT),
-    ConnectResp = mysql_net:connect(Host, Port, Timeout),
-    try_authenticate(ConnectResp, User, Pwd).
+    Phases =
+        [fun connect_socket/1,
+         fun connect_auth/1,
+         fun connect_init_db/1],
+    State = init_connect_state(Options),
+    connect_result(apply_connect_phases(Phases, State)).
 
-try_authenticate({ok, Sock}, User, Pwd) ->
-    handle_authenticate(mysql_auth:authenticate(Sock, User, Pwd), Sock);
-try_authenticate({error, Err}, _User, _Pwd) ->
-    {error, Err}.
+init_connect_state(Options) ->
+    Opt = fun(Name, Default) -> mysql_util:option(Name, Options, Default) end,
+    #connect_state{
+       host     = Opt(host, ?DEFAULT_HOST),
+       port     = Opt(port, ?DEFAULT_PORT),
+       user     = Opt(user, ?DEFAULT_USER),
+       password = Opt(password, ?DEFAULT_PWD),
+       timeout  = Opt(timeout, ?DEFAULT_CONNECT_TIMEOUT),
+       database = Opt(database, undefined)}.
 
-handle_authenticate(#ok_packet{}, Sock) ->
+apply_connect_phases([Phase|Rest], #connect_state{}=State) ->
+    apply_connect_phases(Rest, Phase(State));
+apply_connect_phases(_, Result) ->
+    Result.
+
+connect_socket(#connect_state{host=Host, port=Port, timeout=Timeout}=S) ->
+    case mysql_net:connect(Host, Port, Timeout) of
+        {ok, Sock} -> S#connect_state{sock=Sock};
+        {error, Err} -> {error, Err}
+    end.
+
+connect_auth(#connect_state{sock=Sock, user=User, password=Pwd}=State) ->
+    case mysql_auth:authenticate(Sock, User, Pwd) of
+        #ok_packet{} -> State;
+        #err_packet{}=Err ->
+            try_close(Sock),
+            {error, Err}
+    end.
+
+connect_init_db(#connect_state{database=undefined}=State) ->
+    State;
+connect_init_db(#connect_state{database=Db, sock=Sock}=State) ->
+    case init_db(#mysql{sock=Sock}, Db) of
+        #ok_packet{} -> State;
+        #err_packet{}=Err ->
+            try_close(Sock),
+            {error, Err}
+    end.
+
+connect_result(#connect_state{sock=Sock}) ->
     {ok, #mysql{sock=Sock}};
-handle_authenticate(#err_packet{}=Err, Sock) ->
-    try_close(Sock),
+connect_result({error, Err}) ->
     {error, Err}.
 
 %% ===================================================================
@@ -284,10 +326,15 @@ close_statement(#mysql{sock=Sock}, #prepared_stmt{stmt_id=Id}) ->
     send_packet(Sock, 0, mysql_protocol:com_stmt_close(Id)).
 
 %% ===================================================================
-%% Command wrappers
+%% Simple command wrappers
 %% ===================================================================
 
 ping(#mysql{sock=Sock}) ->
     send_packet(Sock, 0, mysql_protocol:com_ping()),
+    {1, Resp} = decode_packet(recv_packet(Sock)),
+    Resp.
+
+init_db(#mysql{sock=Sock}, Db) ->
+    send_packet(Sock, 0, mysql_protocol:com_init_db(Db)),
     {1, Resp} = decode_packet(recv_packet(Sock)),
     Resp.

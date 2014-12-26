@@ -23,7 +23,7 @@
 
 %% Command packets
 -export([com_quit/0,
-         com_init/1,
+         com_init_db/1,
          com_query/1,
          com_ping/0,
          com_stmt_prepare/1,
@@ -70,7 +70,7 @@
 %% Commands
 
 -define(COM_QUIT,         16#01).
--define(COM_INIT,         16#02).
+-define(COM_INIT_DB,      16#02).
 -define(COM_QUERY,        16#03).
 -define(COM_PING,         16#0e).
 -define(COM_STMT_PREPARE, 16#16).
@@ -496,7 +496,7 @@ com_ping() -> <<?COM_PING>>.
 
 com_quit() -> <<?COM_QUIT>>.
 
-com_init(Db) -> <<?COM_INIT, Db/binary>>.
+com_init_db(Db) -> <<?COM_INIT_DB, Db/binary>>.
 
 com_query(Query) -> <<?COM_QUERY, Query/binary>>.
 
