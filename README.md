@@ -146,6 +146,33 @@ properties, which applied a map to the columns in a result set (or undefined
 otherwise). E.g. `column_names` would return a map of column names for a
 resulset.
 
+## API for Pattern Matching
+
+We don't want to hide everything behind functions as this would cut against
+Erlang's convention of handling results via pattern matching.
+
+E.g. this goes away:
+
+```
+get_users(Db) ->
+    handle_users_select(mysql:execute(Db, "select * from users")).
+
+handle_users_select({ok, Users}) when length(Users) == 0 ->
+    no_users;
+handle_users_select({ok, Users}) ->
+    format_users(Users);
+handle_users_select({error, Err}) ->
+    error({select_users, Err}).
+```
+
+Instead, you'd need to call `mysql:rows` first and use its results, but only
+for success cases. So users will end up writing functions like this:
+
+```
+rows({ok, Result}) -> {ok, mysql:rows(Result)};
+rows({error, Error}) -> {error, Error}.
+```
+
 ## Prepared Statement
 
 A prepared statement is like a text query on the surface. But MySQL implements
@@ -221,11 +248,38 @@ alternatively, `free`. We're really talking about a counterpart to `prepare`
 
 ## Error Details
 
-Using a record named dberr to provide an error result in this form:
+It's very common to match against specific error codes. E.g.
 
-    {error, Error}
+```
+handle_result({error, {"42000", ...}}) -> handle_permission_error();
+handle_result({error, Err}) -> handle_general_error(Err).
+```
 
-The record has these fields:
+To support this usage, it's important to:
+
+- Provide one or more values to match
+- Avoid long tuples that are typically handled by usine a record def
+- Avoid extra noise (in particular record tags)
+
+Cases to avoid:
+
+```
+handle_result1({error, {"42000", _, _, _}}) -> handle_permission_error().
+
+handle_result2({error, {dberr, "42000", _, _}) -> handle_permission_error().
+
+handle_result3({error, #dberr{code="42000"}) -> handle_permission_error().
+```
+
+The last case I think is important to avoid as it starts to suggest that the
+API must ship with supporting code. I'd like to avoid this. The interface
+should be easy to implement without any shared libraries. This is similar to
+Python's approach and it will work fine with Erlang, given some thought.
+
+We obviously want to provide error values in the form `{error, Reason}`.
+
+The payload should contain, at a minimum, the fields: `sqlstate`,
+`native_code`, and `msg`.
 
 `sqlstate`
 : The
@@ -235,10 +289,10 @@ completely obvious what this. The term `state` is ambiguous and collides with
 Erlang state nomenclature. If you search for "sqlstate" you get what this
 is. The extra few characters I think is worth it to clarify what this is.
 
-`native`
-: This is the native error. The term `native` is used to avoid using anything
-that might overlap with `sqlstate` - so e.g. `code` and `error` are not good
-options.
+`native_code`
+: This is the native error code. The term `native_code` is used to make it
+completely obvious that we're not dealing with `sqlstate` and that the value is
+a code that's tied to the implementation (native).
 
 `msg`
 : The textual representation of the error.
@@ -265,22 +319,20 @@ accommodate:
 These are all arguably fields that could be encoded in a single `msg` field
 however.
 
-Given this is a record, we could add an `extra` field (proplist or map) without
-impacting code/usage. It'd be nice however to use this spec without requiring
-any code downloads - i.e. this is an _easy to implement_ spec.
+If we structured the error as follows, we could accommodate as much detail as
+needed:
 
-Without the record definition, an error handler might look like this:
+    `{error, {SQLState, Detail}=Error}`
 
-``` erlang
-handle_result({ok, Result}) ->
-    Result.
-handle_result({error, {dberr, "42000", _, _}}) ->
-    error("Invalid syntax");
+To get the property list, which contains the native code, message, and anything
+else provided by the driver, we could use `describe`:
+
+```
+mysql:describe(Error, native_code)
 ```
 
-The third element, as `msg` could be abused to include a map or proplist.
-
-I'm inclined to stick with the limitation of a simple three-element record.
+Providing a two-tuple with `sqlstate` as the first element enables support for
+simply code-based pattern matching (see API for Pattern Matching above).
 
 ## Representing NULL
 

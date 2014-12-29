@@ -70,25 +70,6 @@ execute(Db, Stmt, Params) ->
 %% TODO: execute(Db, Stmt, Params, Options) to enable cursor based row
 %% retrieval
 
-describe(#resultset{}=RS) ->
-    describe_resultset(RS);
-describe(#ok_packet{}=OK) ->
-    describe_ok(OK);
-describe(#err_packet{}=Err) ->
-    describe_err(Err).
-
-describe(#resultset{rows=Rows}, rowcount) ->
-    length(Rows);
-describe(#ok_packet{affected_rows=Rows}, rowcount) ->
-    Rows;
-describe(#resultset{columns=Cols}, column_names) ->
-    [C#coldef.name || C <- Cols];
-describe(#resultset{columns=Cols}, column_types) ->
-    [dbapi_type(C#coldef.type) || C <- Cols];
-describe(Term, Name) ->
-    %% TODO: continue to optimize here - this is a catchall
-    proplists:get_value(Name, describe(Term)).
-
 rows(#resultset{rows=Rows}) -> Rows;
 rows(#ok_packet{}) -> [].
 
@@ -130,6 +111,26 @@ dbapi_result(#prepared_stmt{}=Stmt) ->
 %% ===================================================================
 %% Descriptions
 %% ===================================================================
+
+describe(#resultset{}=RS) ->
+    describe_resultset(RS);
+describe(#ok_packet{}=OK) ->
+    describe_ok(OK);
+describe({_, #err_packet{}=Err}) ->
+    describe_err(Err).
+
+describe(#resultset{rows=Rows}, rowcount) ->
+    length(Rows);
+describe(#ok_packet{affected_rows=Rows}, rowcount) ->
+    Rows;
+describe(#resultset{columns=Cols}, column_names) ->
+    [C#coldef.name || C <- Cols];
+describe(#resultset{columns=Cols}, column_types) ->
+    [dbapi_type(C#coldef.type) || C <- Cols];
+describe({_, #err_packet{code=Code}}, native_code) ->
+    Code;
+describe(Term, Name) ->
+    proplists:get_value(Name, describe(Term)).
 
 describe_resultset(#resultset{columns=Cols, rows=Rows}) ->
     [{rowcount, length(Rows)},
@@ -206,7 +207,7 @@ describe_ok(
 
 describe_err(#err_packet{sqlstate=SqlState, code=Code, msg=Msg}) ->
     [{sqlstate, SqlState},
-     {native, Code},
+     {native_code, Code},
      {msg, Msg}].
 
 %% ===================================================================

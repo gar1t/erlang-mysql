@@ -15,7 +15,8 @@
          fun init_db/1,
          fun insert_select/1,
          fun null_bitmap/1,
-         fun prepared_statements/1]).
+         fun prepared_statements/1,
+         fun error_interface/1]).
 
 %% ===================================================================
 %% Run tests
@@ -66,13 +67,12 @@ maybe_int_opt(port, Value) -> list_to_integer(Value);
 maybe_int_opt(_, Value) -> Value.
 
 connect_opts(Opts) ->
-    [{host, mysql_util:option(host, Opts, ?DEFAULT_HOST)},
-     {port, mysql_util:option(port, Opts, ?DEFAULT_PORT)},
-     {user, mysql_util:option(user, Opts, ?DEFAULT_USER)},
-     {password, mysql_util:option(password, Opts, ?DEFAULT_PASSWORD)}].
-
-test_db_opt(Opts) ->
-    mysql_util:option(database, Opts, ?DEFAULT_DATABASE).
+    Opt = fun(Name, Default) -> mysql_util:option(Name, Opts, Default) end,
+    [{host,     Opt(host, ?DEFAULT_HOST)},
+     {port,     Opt(port, ?DEFAULT_PORT)},
+     {user,     Opt(user, ?DEFAULT_USER)},
+     {password, Opt(password, ?DEFAULT_PASSWORD)},
+     {database, Opt(database, ?DEFAULT_DATABASE)}].
 
 %% ===================================================================
 %% Ping server
@@ -94,9 +94,16 @@ ping_server(Opts) ->
 init_db(Opts) ->
     io:format("init_db: "),
 
-    ConnectOpts = [{database, test_db_opt(Opts)}|connect_opts(Opts)],
+    ConnectOpts = connect_opts(Opts),
+    TestDb = mysql_util:option(database, ConnectOpts, undefined),
+    true = TestDb /= null,
+    true = TestDb /= undefined,
+
     {ok, Db} = mysql:connect(ConnectOpts),
-    {ok, _} = mysql:execute(Db, "show tables"),
+
+    {ok, RS} = mysql:execute(Db, "select database()"),
+    [{TestDbBin}] = mysql:rows(RS),
+    TestDbBin = iolist_to_binary(TestDb),
 
     ok = mysql:close(Db),
 
@@ -112,7 +119,6 @@ insert_select(Opts) ->
     {ok, Db} = mysql:connect(connect_opts(Opts)),
 
     %% Create a table we can insert into
-    {ok, _} = mysql:execute(Db, "use " ++ test_db_opt(Opts)),
     {ok, _} = mysql:execute(Db, "drop table if exists __t"),
     {ok, _} = mysql:execute(Db, "create table __t (i int, s varchar(100))"),
 
@@ -237,7 +243,6 @@ prepared_statements(Opts) ->
     {ok, Db} = mysql:connect(Opts),
 
     %% Create a table we can insert into
-    {ok, _} = mysql:execute(Db, "use " ++ test_db_opt(Opts)),
     {ok, _} = mysql:execute(Db, "drop table if exists __t"),
     CreateTableSQL =
         "create table __t ("
@@ -270,3 +275,34 @@ prepared_statements(Opts) ->
     ok = mysql:close(Db),
 
     io:format("OK~n").
+
+%% ===================================================================
+%% Error interface
+%% ===================================================================
+
+error_interface(Opts) ->
+    io:format("error_interface: "),
+
+    {ok, Db} = mysql:connect(Opts),
+
+    %% All errors are designated by the standard two-tuple:
+
+    {error, Reason} = mysql:execute(Db, "bad syntax"),
+
+    %% An error reason is always a two tuple of a code (sqlstate) and an opaque
+    %% term. Our statement contains a syntax error, so we get the 42000 code:
+
+    {"42000", _Opaque} = Reason,
+
+    %% We can use describe to get more information:
+
+    [{sqlstate,"42000"},
+     {native_code,1064},
+     {msg, <<"You have an error in your SQL syntax", _/binary>>}]
+        = mysql:describe(Reason),
+
+    ok = mysql:close(Db),
+
+    io:format("OK~n").
+
+-compile(export_all).

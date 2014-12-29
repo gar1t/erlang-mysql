@@ -335,7 +335,7 @@ error_packet(<<Code:16/little,
                _:1/binary,
                SqlState:5/binary,
                Msg/binary>>) ->
-    #err_packet{code=Code, sqlstate=SqlState, msg=Msg}.
+    #err_packet{code=Code, sqlstate=binary_to_list(SqlState), msg=Msg}.
 
 %% ===================================================================
 %% EOF Packet
