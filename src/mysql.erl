@@ -17,6 +17,8 @@
 -export([connect/1,
          execute/2,
          execute/3,
+         select/2,
+         select/3,
          describe/1,
          describe/2,
          rows/1,
@@ -66,6 +68,18 @@ execute(Db, Query) ->
 
 execute(Db, Stmt, Params) ->
     dbapi_result(mysql_lib:execute_statement(Db, Stmt, Params)).
+
+select(Db, Query) ->
+    case execute(Db, Query) of
+        {ok, #resultset{rows=Rows}} -> {ok, Rows};
+        {error, Err} -> {error, Err}
+    end.
+
+select(Db, Stmt, Params) ->
+    case execute(Db, Stmt, Params) of
+        {ok, #resultset{rows=Rows}} -> {ok, Rows};
+        {error, Err} -> {error, Err}
+    end.
 
 %% TODO: execute(Db, Stmt, Params, Options) to enable cursor based row
 %% retrieval

@@ -165,6 +165,14 @@ insert_select(Opts) ->
     [long, var_string] = mysql:describe(R2, column_types),
     [<<"i">>, <<"s">>] = mysql:describe(R2, column_names),
 
+    %% As a shortcut, we can use `select/2` to return the rows directly from a
+    %% select statement.
+
+    {ok, [{<<"2">>, <<"Cat">>},
+          {<<"1">>, <<"Dog">>},
+          {<<"3">>, <<"Lemur">>}]} =
+        mysql:select(Db, "select * from __t order by s"),
+
     ok = mysql:close(Db),
 
     io:format("OK~n").
@@ -271,6 +279,11 @@ prepared_statements(Opts) ->
     {ok, R1} = mysql:execute(Db, Select, [0]),
     [{1, 1.12345, <<"Hello">>, Now, <<1,2,3,4>>},
      {2, null, <<"Goodbye">>, Now, null}] = mysql:rows(R1),
+
+    %% As with `select/2` we can use `select/3` with a statement and params.
+
+    {ok, [{2, null, <<"Goodbye">>, Now, null}]} = 
+        mysql:select(Db, Select, [1]),
 
     ok = mysql:close(Db),
 
