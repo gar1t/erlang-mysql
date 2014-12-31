@@ -358,15 +358,15 @@ signed_ints(Opts) ->
           {<<"2147483647">>,  <<"4294967295">>}]} =
         mysql:select(Db, "select * from __t"),
 
-    %% Let's use a prepared statement (binary protocol) to select.
+    %% Using a prepared statement (binary protocol) to select:
 
     {ok, SelectStmt} = mysql:prepare(Db, "select * from __t"),
 
-    %% In this case, we're broken - unsigned value wraps :(
+    %% We get the same results decoded properly as signed and unsigned ints.
 
     {ok, [{0,           0},
           {-2147483648, 0},
-          {2147483647,  -1}]} =
+          {2147483647,  4294967295}]} =
         mysql:select(Db, SelectStmt, []),
 
     %% Let's write using the binary protocol.
@@ -377,22 +377,20 @@ signed_ints(Opts) ->
     {ok, _} = mysql:execute(Db, InsertStmt, [-2147483648, 0]),
     {ok, _} = mysql:execute(Db, InsertStmt, [2147483647, 4294967295]),
 
-    %% Reading using the text protocol (which accurately shows the values as
-    %% they are in the db, but in text format), we see our expected values.
+    %% Reading using the text protocol we see our expected values as text.
 
-    {ok,[{<<"0">>,           <<"0">>},
-         {<<"-2147483648">>, <<"0">>},
-         {<<"2147483647">>,  <<"4294967295">>}]} =
+    {ok, [{<<"0">>,           <<"0">>},
+          {<<"-2147483648">>, <<"0">>},
+          {<<"2147483647">>,  <<"4294967295">>}]} =
         mysql:select(Db, "select * from __t"),
 
-    %% But reading them back is still broken :(
+    %% As well as using the binary protocol via the prepared statement.
 
     {ok, [{0,           0},
           {-2147483648, 0},
-          {2147483647,  -1}]} =
+          {2147483647,  4294967295}]} =
         mysql:select(Db, SelectStmt, []),
 
     ok = mysql:close(Db),
 
-    %io:format("OK~n").
-    io:format("ERROR (see test comments for details)~n").
+    io:format("OK~n").

@@ -460,10 +460,16 @@ acc_decoded_values([Col|RestCols], ColPos, IsNull, Data, Values) ->
 acc_decoded_values([], _ColPos, _IsNull, <<>>, Values) ->
     lists:reverse(Values).
 
-decode_binary_value(_Null=false, #coldef{type=Type}, Data) ->
-    decode_binary_value(Type, Data);
+decode_binary_value(_Null=false, #coldef{type=Type, flags=Flags}, Data) ->
+    decode_binary_value({Type, signed(Flags)}, Data);
 decode_binary_value(_Null=true, _Col, Data) ->
     {null, Data}.
+
+signed(ColFlags) ->
+    case ColFlags band 16#20 of
+        16#20 -> unsigned;
+        0     -> signed
+    end.
 
 %% ===================================================================
 %% Statement prepare response packet decoder
@@ -627,11 +633,15 @@ decode_integer(<<16#fd, I:24/little, Rest/binary>>) -> {I, Rest};
 decode_integer(<<16#fe, I:64/little, Rest/binary>>) -> {I, Rest}.
 
 %% ===================================================================
-%% Fixed length integer decoder
+%% Fixed length integer decoders
 %% ===================================================================
 
 decode_integer(Len, Data) ->
     <<I:Len/little-signed, Rest/binary>> = Data,
+    {I, Rest}.
+
+decode_unsigned_integer(Len, Data) ->
+    <<I:Len/little, Rest/binary>> = Data,
     {I, Rest}.
 
 %% ===================================================================
@@ -772,28 +782,36 @@ is_field_null(Field, Offset, Bitmap) ->
 %% Binary value decoder
 %% ===================================================================
 
-decode_binary_value(?TYPE_DECIMAL, Data)     -> decode_string(Data);
-decode_binary_value(?TYPE_TINY, Data)        -> decode_integer(8, Data);
-decode_binary_value(?TYPE_SHORT, Data)       -> decode_integer(16, Data);
-decode_binary_value(?TYPE_LONG, Data)        -> decode_integer(32, Data);
-decode_binary_value(?TYPE_FLOAT, Data)       -> decode_float(32, Data);
-decode_binary_value(?TYPE_DOUBLE, Data)      -> decode_float(64, Data);
-decode_binary_value(?TYPE_TIMESTAMP, Data)   -> decode_timestamp(Data);
-decode_binary_value(?TYPE_LONGLONG, Data)    -> decode_integer(16, Data);
-decode_binary_value(?TYPE_INT24, Data)       -> decode_integer(32, Data);
-decode_binary_value(?TYPE_DATE, Data)        -> decode_timestamp(Data);
-decode_binary_value(?TYPE_TIME, Data)        -> decode_time(Data);
-decode_binary_value(?TYPE_DATETIME, Data)    -> decode_timestamp(Data);
-decode_binary_value(?TYPE_YEAR, Data)        -> decode_integer(16, Data);
-decode_binary_value(?TYPE_VARCHAR, Data)     -> decode_string(Data);
-decode_binary_value(?TYPE_BIT, Data)         -> decode_string(Data);
-decode_binary_value(?TYPE_NEWDECIMAL, Data)  -> decode_string(Data);
-decode_binary_value(?TYPE_ENUM, Data)        -> decode_string(Data);
-decode_binary_value(?TYPE_SET, Data)         -> decode_string(Data);
-decode_binary_value(?TYPE_TINY_BLOB, Data)   -> decode_string(Data);
-decode_binary_value(?TYPE_MEDIUM_BLOB, Data) -> decode_string(Data);
-decode_binary_value(?TYPE_LONG_BLOB, Data)   -> decode_string(Data);
-decode_binary_value(?TYPE_BLOB, Data)        -> decode_string(Data);
-decode_binary_value(?TYPE_VAR_STRING, Data)  -> decode_string(Data);
-decode_binary_value(?TYPE_STRING, Data)      -> decode_string(Data);
-decode_binary_value(?TYPE_GEOMETRY, Data)    -> decode_string(Data).
+decode_binary_value(Type, Data) ->
+    case Type of
+        {?TYPE_DECIMAL, _}         -> decode_string(Data);
+        {?TYPE_TINY, signed}       -> decode_integer(8, Data);
+        {?TYPE_TINY, unsigned}     -> decode_unsigned_integer(8, Data);
+        {?TYPE_SHORT, signed}      -> decode_integer(16, Data);
+        {?TYPE_SHORT, unsigned}    -> decode_unsigned_integer(16, Data);
+        {?TYPE_LONG, signed}       -> decode_integer(32, Data);
+        {?TYPE_LONG, unsigned}     -> decode_unsigned_integer(32, Data);
+        {?TYPE_FLOAT, _}           -> decode_float(32, Data);
+        {?TYPE_DOUBLE, _}          -> decode_float(64, Data);
+        {?TYPE_TIMESTAMP, _}       -> decode_timestamp(Data);
+        {?TYPE_LONGLONG, signed}   -> decode_integer(16, Data);
+        {?TYPE_LONGLONG, unsigned} -> decode_unsigned_integer(16, Data);
+        {?TYPE_INT24, signed}      -> decode_integer(32, Data);
+        {?TYPE_INT24, unsigned}    -> decode_unsigned_integer(32, Data);
+        {?TYPE_DATE, _}            -> decode_timestamp(Data);
+        {?TYPE_TIME, _}            -> decode_time(Data);
+        {?TYPE_DATETIME, _}        -> decode_timestamp(Data);
+        {?TYPE_YEAR, _}            -> decode_integer(16, Data);
+        {?TYPE_VARCHAR, _}         -> decode_string(Data);
+        {?TYPE_BIT, _}             -> decode_string(Data);
+        {?TYPE_NEWDECIMAL, _}      -> decode_string(Data);
+        {?TYPE_ENUM, _}            -> decode_string(Data);
+        {?TYPE_SET, _}             -> decode_string(Data);
+        {?TYPE_TINY_BLOB, _}       -> decode_string(Data);
+        {?TYPE_MEDIUM_BLOB, _}     -> decode_string(Data);
+        {?TYPE_LONG_BLOB, _}       -> decode_string(Data);
+        {?TYPE_BLOB, _}            -> decode_string(Data);
+        {?TYPE_VAR_STRING, _}      -> decode_string(Data);
+        {?TYPE_STRING, _}          -> decode_string(Data);
+        {?TYPE_GEOMETRY, _}        -> decode_string(Data)
+    end.
