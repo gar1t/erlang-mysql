@@ -516,3 +516,9 @@ implementation.
 
 How do we handle timeouts. Connect timeout is easy enough and it currently
 accommodated (not tested). What about execute timeouts?
+
+## Signed Flags
+
+We're not handling signed numbers correctly. See failing test
+`mysql_test:signed_ints`.
+

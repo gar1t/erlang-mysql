@@ -2,6 +2,8 @@
 
 -export([run_all/0, run_all/1, run_all_cli/0]).
 
+-compile(export_all). % To run individual tests
+
 -include("dbapi.hrl").
 
 -define(DEFAULT_HOST, "localhost").
@@ -16,7 +18,8 @@
          fun insert_select/1,
          fun null_bitmap/1,
          fun prepared_statements/1,
-         fun error_interface/1]).
+         fun error_interface/1,
+         fun signed_ints/1]).
 
 %% ===================================================================
 %% Run tests
@@ -318,4 +321,72 @@ error_interface(Opts) ->
 
     io:format("OK~n").
 
--compile(export_all).
+%% ===================================================================
+%% Error interface
+%% ===================================================================
+
+signed_ints(Opts) ->
+    io:format("signed_ints: "),
+
+    {ok, Db} = mysql:connect(Opts),
+
+    %% Create a table with both signed ans unsigned ints.
+
+    {ok, _} = mysql:execute(Db, "drop table if exists __t"),
+    {ok, _} = mysql:execute(Db, "create table __t ("
+                                " i int signed, "
+                                " u int unsigned)"),
+    
+    %% Use the text query interface to insert values along various ranges.
+
+    Insert =
+        fun(I, U) ->
+                SQL = io_lib:format(
+                        "insert into __t values (~b, ~b)",
+                        [I, U]),
+                mysql:execute(Db, SQL)
+        end,
+
+    {ok, _} = Insert(0, 0),                   % Zeros
+    {ok, _} = Insert(-2147483648, 0),         % Min values
+    {ok, _} = Insert(2147483647, 4294967295), % Max values
+
+    %% Using the text query interface, we get what we expect.
+
+    {ok, [{<<"0">>,           <<"0">>},
+          {<<"-2147483648">>, <<"0">>},
+          {<<"2147483647">>,  <<"4294967295">>}]} =
+        mysql:select(Db, "select * from __t"),
+
+    %% Let's use a prepared statement (binary protocol) to select.
+
+    {ok, SelectStmt} = mysql:prepare(Db, "select * from __t"),
+
+    %% In this case, we're broken - unsigned value wraps :(
+
+    {ok, [{0,           0},
+          {-2147483648, 0},
+          {2147483647,  -1}]} =
+        mysql:select(Db, SelectStmt, []),
+
+    %% Let's write using the binary protocol.
+
+    {ok, InsertStmt} = mysql:prepare(Db, "insert into __t values (?, ?)"),
+    {ok, _} = mysql:execute(Db, "delete from __t"),
+    {ok, _} = mysql:execute(Db, InsertStmt, [0, 0]),
+    {ok, _} = mysql:execute(Db, InsertStmt, [-2147483648, 0]),
+    {ok, _} = mysql:execute(Db, InsertStmt, [2147483647, 4294967295]),
+
+    %% Reading using the text protocol (which accurately shows the values as
+    %% they are in the db, but in text format), we see we've written invalid
+    %% values.
+
+    {ok, [{<<"0">>,           <<"0">>},
+          {<<"-2147483648">>, <<"0">>},
+          {<<"2147483647">>,  <<"0">>}]} = 
+        mysql:select(Db, "select * from __t"),
+
+    ok = mysql:close(Db),
+
+    %io:format("OK~n").
+    io:format("ERROR (see test comments for details)~n").
