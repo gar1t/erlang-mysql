@@ -1,4 +1,4 @@
--record(mysql, {sock}).
+-record(mysql, {lib, sock}).
 
 -record(ok_packet,
         {affected_rows,

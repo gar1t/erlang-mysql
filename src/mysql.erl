@@ -33,6 +33,11 @@
 %% Extra
 -export([ping/1]).
 
+%% Converters
+-export([integer/1]).
+
+-define(DEFAULT_LIB, mysql_lib).
+
 %% ===================================================================
 %% App start
 %% ===================================================================
@@ -49,11 +54,12 @@ get_cfg(max_allowed_packet) -> 100 * 1024 * 1024;
 get_cfg(default_character_set) -> 0.
 
 %% ===================================================================
-%% DB API
+%% Connect
 %% ===================================================================
 
 connect(Options) ->
-    mysql_lib:connect(validate_connect_options(Options)).
+    ValidatedOpts = validate_connect_options(Options),
+    connect_result(?DEFAULT_LIB:connect(ValidatedOpts)).
 
 validate_connect_options(Options) ->
     [validate_connect_option(Opt) || Opt <- Options].
@@ -63,11 +69,20 @@ validate_connect_option({password, Pwd}) -> {password, iolist_to_binary(Pwd)};
 validate_connect_option({database, Db})  -> {database, iolist_to_binary(Db)};
 validate_connect_option(Opt)             -> Opt.
 
-execute(Db, Query) ->
-    dbapi_result(mysql_lib:query(Db, iolist_to_binary(Query))).
+connect_result({ok, Sock}) ->
+    {ok, #mysql{lib=?DEFAULT_LIB, sock=Sock}};
+connect_result({error, Err}) ->
+    {error, Err}.
 
-execute(Db, Stmt, Params) ->
-    dbapi_result(mysql_lib:execute_statement(Db, Stmt, Params)).
+%% ===================================================================
+%% Remaining DB API
+%% ===================================================================
+
+execute(#mysql{lib=Lib, sock=Sock}, Query) ->
+    dbapi_result(Lib:query(Sock, iolist_to_binary(Query))).
+
+execute(#mysql{lib=Lib, sock=Sock}, Stmt, Params) ->
+    dbapi_result(Lib:execute_statement(Sock, Stmt, Params)).
 
 select(Db, Query) ->
     case execute(Db, Query) of
@@ -100,14 +115,14 @@ last(_) -> error(not_implemented).
 
 prev(_) -> error(not_implemented).
 
-prepare(Db, Stmt) ->
-    dbapi_result(mysql_lib:prepare_statement(Db, iolist_to_binary(Stmt))).
+prepare(#mysql{lib=Lib, sock=Sock}, Stmt) ->
+    dbapi_result(Lib:prepare_statement(Sock, iolist_to_binary(Stmt))).
 
-close(Db) ->
-    mysql_lib:close(Db).
+close(#mysql{lib=Lib, sock=Sock}) ->
+    Lib:close(Sock).
 
-free(Db, Stmt) ->
-    mysql_lib:close_statement(Db, Stmt).
+free(#mysql{lib=Lib, sock=Sock}, Stmt) ->
+    Lib:close_statement(Sock, Stmt).
 
 %% ===================================================================
 %% MySQL -> DB API
@@ -228,6 +243,12 @@ describe_err(#err_packet{sqlstate=SqlState, code=Code, msg=Msg}) ->
 %% Extra
 %% ===================================================================
 
-ping(Db) ->
-    #ok_packet{} = mysql_lib:ping(Db),
+ping(#mysql{lib=Lib, sock=Sock}) ->
+    #ok_packet{} = Lib:ping(Sock),
     ok.
+
+%% ===================================================================
+%% Text to native conversion
+%% ===================================================================
+
+integer(Bin) -> list_to_integer(binary_to_list(Bin)).

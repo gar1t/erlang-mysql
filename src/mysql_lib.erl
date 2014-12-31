@@ -79,7 +79,7 @@ connect_auth(#connect_state{sock=Sock, user=User, password=Pwd}=State) ->
 connect_init_db(#connect_state{database=undefined}=State) ->
     State;
 connect_init_db(#connect_state{database=Db, sock=Sock}=State) ->
-    case init_db(#mysql{sock=Sock}, Db) of
+    case init_db(Sock, Db) of
         #ok_packet{} -> State;
         #err_packet{}=Err ->
             try_close(Sock),
@@ -87,7 +87,7 @@ connect_init_db(#connect_state{database=Db, sock=Sock}=State) ->
     end.
 
 connect_result(#connect_state{sock=Sock}) ->
-    {ok, #mysql{sock=Sock}};
+    {ok, Sock};
 connect_result({error, Err}) ->
     {error, Err}.
 
@@ -95,7 +95,7 @@ connect_result({error, Err}) ->
 %% Close
 %% ===================================================================
 
-close(#mysql{sock=Sock}) ->
+close(Sock) ->
     send_packet(Sock, 0, mysql_protocol:com_quit()),
     try_close(Sock).
 
@@ -143,7 +143,7 @@ apply_recv_parts([], _, Acc) -> Acc.
 %% Query
 %% ===================================================================
 
-query(#mysql{sock=Sock}, Query) ->
+query(Sock, Query) ->
     send_packet(Sock, 0, mysql_protocol:com_query(Query)),
     recv_query_resp(Sock).
 
@@ -210,7 +210,7 @@ finalize_rows(#resultset{rows=Rows}=RS) ->
 %% Prepare statement
 %% ===================================================================
 
-prepare_statement(#mysql{sock=Sock}, Query) ->
+prepare_statement(Sock, Query) ->
     send_packet(Sock, 0, mysql_protocol:com_stmt_prepare(Query)),
     recv_stmt_prepare_resp(Sock).
 
@@ -268,7 +268,7 @@ finalize_stmt_cols(#prepared_stmt{columns=Cols}=Stmt) ->
 %% Execute statement
 %% ===================================================================
 
-execute_statement(#mysql{sock=Sock}, Stmt, Values) ->
+execute_statement(Sock, Stmt, Values) ->
     %% TODO: We'd need to set a flag for the execute command to enable
     %% cursor/row-base retrieval.
     send_packet(Sock, 0, mysql_protocol:com_stmt_execute(Stmt, Values)),
@@ -322,19 +322,19 @@ handle_execute_resp_row({_Seq, <<0, Data/binary>>}, Sock,
 %% Close statement
 %% ===================================================================
 
-close_statement(#mysql{sock=Sock}, #prepared_stmt{stmt_id=Id}) ->
+close_statement(Sock, #prepared_stmt{stmt_id=Id}) ->
     send_packet(Sock, 0, mysql_protocol:com_stmt_close(Id)).
 
 %% ===================================================================
 %% Simple command wrappers
 %% ===================================================================
 
-ping(#mysql{sock=Sock}) ->
+ping(Sock) ->
     send_packet(Sock, 0, mysql_protocol:com_ping()),
     {1, Resp} = decode_packet(recv_packet(Sock)),
     Resp.
 
-init_db(#mysql{sock=Sock}, Db) ->
+init_db(Sock, Db) ->
     send_packet(Sock, 0, mysql_protocol:com_init_db(Db)),
     {1, Resp} = decode_packet(recv_packet(Sock)),
     Resp.
