@@ -109,7 +109,7 @@ Note that the Python DB API uses a "cursor" to provide a consistent interface:
 
 We could implement the same pattern in Erlang:
 
-```
+```erlang
 dbapi:execute(Db, Query) -> {ok, Result} | {error, Err}
 dbapi:result_rows(Result) -> Rows
 dbapi:result_next(Result) -> {Next, Result2} | eof
@@ -119,7 +119,7 @@ dbapi:result_attr(Result, Name) -> Value
 
 Or more compactly:
 
-```
+```erlang
 dbapi:execute(Db, Query) -> {ok, Result} | {error, Error}
 dbapi:rows(Result) -> Rows
 dbapi:next(Result) -> {Next, Result2} | eof
@@ -133,7 +133,7 @@ wanted to. Otherwise, it would serve the data via these additional functions.
 
 We could also provide an optimization/convenience form of describe:
 
-```
+```erlang
 dbapi:describe(Result, Name) -> Value
 ```
 
@@ -153,7 +153,7 @@ Erlang's convention of handling results via pattern matching.
 
 E.g. this goes away:
 
-```
+```erlang
 get_users(Db) ->
     handle_users_select(mysql:execute(Db, "select * from users")).
 
@@ -168,12 +168,12 @@ handle_users_select({error, Err}) ->
 Instead, you'd need to call `mysql:rows` first and use its results, but only
 for success cases. So users will end up writing functions like this:
 
-```
+```erlang
 rows({ok, Result}) -> {ok, mysql:rows(Result)};
 rows({error, Error}) -> {error, Error}.
 ```
 
-## Prepared Statement
+## Prepared Statements
 
 A prepared statement is like a text query on the surface. But MySQL implements
 a very different protocol for it:
@@ -236,7 +236,7 @@ using the statement references in place of the text based queries.
 
 It would require functions to explicitly create and delete statements:
 
-```
+```erlang
 dbapi:prepare(Query) -> {ok, Statement} | {error, Reason}
 dbapi:close_statement(Statement) -> ok
 ```
@@ -250,7 +250,7 @@ alternatively, `free`. We're really talking about a counterpart to `prepare`
 
 It's very common to match against specific error codes. E.g.
 
-```
+```erlang
 handle_result({error, {"42000", ...}}) -> handle_permission_error();
 handle_result({error, Err}) -> handle_general_error(Err).
 ```
@@ -263,7 +263,7 @@ To support this usage, it's important to:
 
 Cases to avoid:
 
-```
+```erlang
 handle_result1({error, {"42000", _, _, _}}) -> handle_permission_error().
 
 handle_result2({error, {dberr, "42000", _, _}) -> handle_permission_error().
@@ -327,7 +327,7 @@ needed:
 To get the property list, which contains the native code, message, and anything
 else provided by the driver, we could use `describe`:
 
-```
+```erlang
 mysql:describe(Error, native_code)
 ```
 
@@ -347,6 +347,102 @@ supports this, but there's a cost to convert from the database format, which is
 is more likely to resemble the calendar datetime format.
 
 Making this a TODO for now.
+
+## Handling Connection Errors
+
+Because we're maintaining an open socket connection as a part of the client
+reference, the client reference will become invalid/corrupt when that
+connection is lost. Similarly, any network error can have this effect.
+
+At the moment, any connection errors must be handled by the client code. In the
+trivial case, the client will crash and be restarted, causing the operation to
+fail. Subsequent operations will succeed if the restarted process can
+reestablish a connection. This is obviously not acceptable and we need a
+reasonable strategy for handling connection errors or other problems with the
+server.
+
+Options:
+
+1. Do nothing and let the client implement the desired behavior
+2. Use a process or processes within the DB API implementation to implement
+   reconnects
+3. Build another layer with the erlang-mysql library (but not a part of
+   the DB API spec) to handle reconnects
+
+Note that Emysql handles reconnects very nicely. However, it's an active
+application, requiring a supervisory hierarchy to run. This is too much to
+require IMO. I think this elmininates option 2.
+
+Option 1 is alwasy at hand as long as we don't complicate the library with
+built-in reconnect behavior.
+
+Option 3 seems the most viable. While it's tempting to consider this in
+conjunction with a connection pool facility, let's leave that alone for now.
+
+We'd want to preserve the interface so that a supervised auto-reconnecting
+connection is used the same as one that is not. I.e. mysql:xxxx functions
+should work exactly the same.
+
+Playing around with a possibility:
+
+```erlang
+%% Create a supervising process.
+
+{ok, Sup} = mysql_sup:start_link(),
+
+%% Open a connection via the supervisor - Options include the normal
+%% connect options plus supervisor options such as retry counts, policies,
+%% etc.
+
+{ok, Db} = mysql_sup:connect(Sup, Options),
+
+%% Use the connection in the normal way. At this point, lost connections
+%% are handled seamlessly (with some additional initial delay to restablish
+%% the lost connection.
+
+mysql:execute(Db, Query)
+```
+
+This is a lovely idea, but how on earth can we sanely pull it off? The current
+`mysql` module naively passes operations through to `mysql_lib`. The `Db` value
+in this case is a record `#mysql{sock}` where the socket is used in calls to
+`mysql_lib`.
+
+We could redefine the record as `#mysql{sock, libmod}` and use `mysql_lib` as
+the default. `mysql_lib` would then implement perhaps a `mysql_lib` behavior.
+
+The supervised version would provide an alternative libmod -- e.g.
+`mysql_sup_lib`, which would wrap calls to `mysql_lib`. The sock would be a
+reference to a socket managed by the supervising process.
+
+Note that this `_sup` here is not a real Erlang supervisor, but behaves like
+one. The implementation would be a gen_server, more likely. This could be a
+little confusing and might be the wrong way to spell this.
+
+This might want to be a "pool" concept. So, alternatively:
+
+```erlang
+%% Start a "pool" process, which has both connect options for a particular
+%% host/db and additional options for the pool (e.g. max connection count,
+%% reconnect options, etc.) Real connections would be lazily created by calls
+%% to `mysql_pool:get_connection`.
+
+{ok, Pool} = mysql_pool:start_link(Options),
+
+%% Get a connection to the database. If one was not available, the pool would
+%% open a new connection (up to max) and provide it as `#mysql{sock, libmod}`
+%% where `sock` is a reference to a connection socket that can be updated
+%% seamlessly in the background on reconnects and `libmod` is a wrapper to
+%% `mysql_lib` that implements reconnect + retry logic based on the pool
+%% options (e.g. max retries, retry delays, etc.)
+
+{ok, Db} = mysql_pool:get_connection(Pool),
+
+%% The client uses the Db reference as any other, not needing to know the
+%% trickier behavior going on behind the scenes.
+
+mysql:execute(Db, Query)
+```
 
 # To Do
 
@@ -406,3 +502,17 @@ Note that the MySQL implementation accepts both formats in (options 1 and 2)
 but only provides option 2 out (not including the microsecond component - this
 isn't coming back from MySQL for some reason - either a bug on our side or not
 using the right type or precision).
+
+## Multiple Statements
+
+Python DB API supports executemany - an explicit function to execute multiple
+statements. Emysql seems to implicitly support it - you separate statements
+with a semi-colon and it just works.
+
+I'm surprised this doesn't "just work" with our current text query
+implementation.
+
+## Timeouts
+
+How do we handle timeouts. Connect timeout is easy enough and it currently
+accommodated (not tested). What about execute timeouts?
