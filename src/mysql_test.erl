@@ -378,13 +378,19 @@ signed_ints(Opts) ->
     {ok, _} = mysql:execute(Db, InsertStmt, [2147483647, 4294967295]),
 
     %% Reading using the text protocol (which accurately shows the values as
-    %% they are in the db, but in text format), we see we've written invalid
-    %% values.
+    %% they are in the db, but in text format), we see our expected values.
 
-    {ok, [{<<"0">>,           <<"0">>},
-          {<<"-2147483648">>, <<"0">>},
-          {<<"2147483647">>,  <<"0">>}]} = 
+    {ok,[{<<"0">>,           <<"0">>},
+         {<<"-2147483648">>, <<"0">>},
+         {<<"2147483647">>,  <<"4294967295">>}]} =
         mysql:select(Db, "select * from __t"),
+
+    %% But reading them back is still broken :(
+
+    {ok, [{0,           0},
+          {-2147483648, 0},
+          {2147483647,  -1}]} =
+        mysql:select(Db, SelectStmt, []),
 
     ok = mysql:close(Db),
 

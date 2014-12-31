@@ -561,10 +561,32 @@ encode_param(null) ->
 encode_param(Timestamp) when is_tuple(Timestamp) ->
     encode_timestamp_param(Timestamp).
 
-encode_integer_param(I) when I =< 16#ffffffff ->
-    {<<?TYPE_LONG, 0>>, <<I:32/little>>};
-encode_integer_param(I) when I =< 16#ffffffffffffffff ->
-    {<<?TYPE_LONGLONG, 0>>, <<I:64/little>>}.
+-define(inrange(I, MinIncl, MaxExcl), I >= MinIncl andalso I < MaxExcl).
+
+-define(tiny(I),      ?inrange(I, -16#80,               16#80)).
+-define(utiny(I),     ?inrange(I, 0,                    16#100)).
+-define(short(I),     ?inrange(I, -16#8000,             16#8000)).
+-define(ushort(I),    ?inrange(I, 0,                    16#10000)).
+-define(int24(I),     ?inrange(I, -16#800000,           16#800000)).
+-define(uint24(I),    ?inrange(I, 0,                    16#1000000)).
+-define(long(I),      ?inrange(I, -16#80000000,         16#80000000)).
+-define(ulong(I),     ?inrange(I, 0,                    16#100000000)).
+-define(longlong(I),  ?inrange(I, -16#8000000000000000, 16#8000000000000000)).
+-define(ulonglong(I), ?inrange(I, 0,                    16#10000000000000000)).
+
+encode_integer_param(I) ->
+    if
+        ?tiny(I)      -> {<<?TYPE_TINY,     0>>,     <<I>>};
+        ?utiny(I)     -> {<<?TYPE_TINY,     16#80>>, <<I>>};
+        ?short(I)     -> {<<?TYPE_SHORT,    0>>,     <<I:16/little>>};
+        ?ushort(I)    -> {<<?TYPE_SHORT,    16#80>>, <<I:16/little>>};
+        ?int24(I)     -> {<<?TYPE_INT24,    0>>,     <<I:24/little>>};
+        ?uint24(I)    -> {<<?TYPE_INT24,    16#80>>, <<I:24/little>>};
+        ?long(I)      -> {<<?TYPE_LONG,     0>>,     <<I:32/little>>};
+        ?ulong(I)     -> {<<?TYPE_LONG,     16#80>>, <<I:32/little>>};
+        ?longlong(I)  -> {<<?TYPE_LONGLONG, 0>>,     <<I:64/little>>};
+        ?ulonglong(I) -> {<<?TYPE_LONGLONG, 16#80>>, <<I:64/little>>}
+    end.
 
 encode_string_param(S) ->
     {<<?TYPE_VAR_STRING, 0>>, encode_string(S)}.
