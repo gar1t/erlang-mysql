@@ -35,7 +35,7 @@
 %% Converters
 -export([integer/1]).
 
--define(DEFAULT_LIB, mysql_lib).
+-define(LIB, mysql_lib).
 
 %% ===================================================================
 %% App start
@@ -50,7 +50,7 @@ start() ->
 
 connect(Options) ->
     ValidatedOpts = validate_connect_options(Options),
-    connect_result(?DEFAULT_LIB:connect(ValidatedOpts)).
+    connect_result(?LIB:connect(ValidatedOpts)).
 
 validate_connect_options(Options) ->
     [validate_connect_option(Opt) || Opt <- Options].
@@ -61,7 +61,7 @@ validate_connect_option({database, Db})  -> {database, iolist_to_binary(Db)};
 validate_connect_option(Opt)             -> Opt.
 
 connect_result({ok, Sock}) ->
-    {ok, #mysql{lib=?DEFAULT_LIB, sock=Sock}};
+    {ok, #mysql{lib=?LIB, sock=Sock}};
 connect_result({error, Err}) ->
     {error, Err}.
 
