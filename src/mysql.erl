@@ -49,8 +49,30 @@ start() ->
 %% ===================================================================
 
 connect(Options) ->
-    ValidatedOpts = validate_connect_options(Options),
+    ValidatedOpts = validate_connect_options(ensure_user(Options)),
     connect_result(?LIB:connect(ValidatedOpts)).
+
+ensure_user(Options) ->
+    UserOpt = proplists:get_value(user, Options),
+    maybe_add_user_env(empty(UserOpt), Options).
+
+empty(undefined) -> true;
+empty(User) -> iolist_size(User) == 0.
+
+maybe_add_user_env(true, Options) ->
+    [{user, user_env()}|Options];
+maybe_add_user_env(false, Options) ->
+    Options.
+
+user_env() ->
+    valid_user_env(os:getenv("USER")).
+
+valid_user_env(false) ->
+    error(user_env_undefined);
+valid_user_env("") ->
+    error(user_env_undefined);
+valid_user_env(User) ->
+    User.
 
 validate_connect_options(Options) ->
     [validate_connect_option(Opt) || Opt <- Options].
