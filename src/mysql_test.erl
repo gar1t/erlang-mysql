@@ -26,6 +26,7 @@
 %% ===================================================================
 
 run_all() ->
+    maybe_trace_tests(),
     run_all(
       maybe_env_opts(
         [{"MYSQL_TEST_HOST", host},
@@ -44,10 +45,39 @@ run_all_cli() ->
         _:Err -> print_error_and_exit(Err)
     end.
 
-print_error_and_exit(Err) ->
-    io:format(standard_error, "ERROR ~p~n", [Err]),
-    io:format(standard_error, "~p~n", [erlang:get_stacktrace()]),
-    erlang:halt(1).
+%% ===================================================================
+%% Trace support
+%% ===================================================================
+
+maybe_trace_tests() ->
+    maybe_trace_tests(os:getenv("TRACE")).
+
+maybe_trace_tests(false) ->
+    ok;
+maybe_trace_tests(Spec) ->
+    apply_trace_specs(string:tokens(Spec, ",")).
+
+apply_trace_specs([Spec|Rest]) ->
+    apply_trace_spec(Spec),
+    apply_trace_specs(Rest);
+apply_trace_specs([]) ->
+    ok.
+
+apply_trace_spec(Spec) ->
+    case parse_trace_spec(Spec) of
+        {Mod, Fun} ->
+            mysql_debug:trace_function(Mod, Fun);
+        Mod ->
+            mysql_debug:trace_module(Mod)
+    end.
+
+parse_trace_spec(Spec) ->
+    case string:tokens(Spec, ":") of
+        [Mod, Fun] -> {to_atom(Mod), to_atom(Fun)};
+        [Mod] -> to_atom(Mod)
+    end.
+
+to_atom(L) -> list_to_existing_atom(L).
 
 %% ===================================================================
 %% Helpers
@@ -76,6 +106,11 @@ connect_opts(Opts) ->
      {user,     Opt(user, ?DEFAULT_USER)},
      {password, Opt(password, ?DEFAULT_PASSWORD)},
      {database, Opt(database, ?DEFAULT_DATABASE)}].
+
+print_error_and_exit(Err) ->
+    io:format(standard_error, "ERROR ~p~n", [Err]),
+    io:format(standard_error, "~p~n", [erlang:get_stacktrace()]),
+    erlang:halt(1).
 
 %% ===================================================================
 %% Ping server
