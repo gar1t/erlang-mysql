@@ -55,6 +55,10 @@
          params,
          values}).
 
+%% Protocol version
+
+-define(PROTOCOL_VER, 10).
+
 %% Capability flags
 
 -define(CLIENT_PROTOCOL_41,       16#00000200).
@@ -168,8 +172,10 @@ decode_handshake(Data) ->
          fun hs_auth_plugin_name/2],
     apply_decoders(Decoders, Data, #handshake{}).
 
-hs_protocol_version(<<Ver, Rest/binary>>, HS) ->
-    {Rest, HS#handshake{protocol_version=Ver}}.
+hs_protocol_version(<<?PROTOCOL_VER, Rest/binary>>, HS) ->
+    {Rest, HS#handshake{protocol_version=?PROTOCOL_VER}};
+hs_protocol_version(<<Ver, _/binary>>, _HS) ->
+    error({unsupported_protocol_version, Ver}).
 
 hs_server_version(Data, HS) ->
     {Ver, Rest} = asciiz(Data),
