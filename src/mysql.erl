@@ -10,8 +10,7 @@
 -include("mysql_internal.hrl").
 
 %% App API
--export([start/0,
-         get_cfg/1]).
+-export([start/0]).
 
 %% DB API
 -export([connect/1,
@@ -44,14 +43,6 @@
 
 start() ->
     application:start(mysql).
-
-%% ===================================================================
-%% Config
-%% ===================================================================
-
-%% TODO: Hard coded values for now - implement app config
-get_cfg(max_allowed_packet) -> 100 * 1024 * 1024;
-get_cfg(default_character_set) -> 0.
 
 %% ===================================================================
 %% Connect

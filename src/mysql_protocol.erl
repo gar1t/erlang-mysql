@@ -110,6 +110,11 @@
 -define(TYPE_STRING,      16#fe).
 -define(TYPE_GEOMETRY,    16#ff).
 
+%% Default config
+
+-define(DEFAULT_MAX_PACKET_SIZE, 104857600). % 100M
+-define(DEFAULT_CHARACTER_SET, 0).
+
 %% ===================================================================
 %% Network
 %% ===================================================================
@@ -232,11 +237,11 @@ hsr_capabilities(State, Data) ->
     {State, [<<Capabilities:32/little>>|Data]}.
 
 hsr_max_packet_size(State, Data) ->
-    Size = mysql:get_cfg(max_allowed_packet),
+    Size = ?DEFAULT_MAX_PACKET_SIZE,
     {State, [<<Size:32/little>>|Data]}.
 
 hsr_character_set(State, Data) ->
-    CharacterSet = mysql:get_cfg(default_character_set),
+    CharacterSet = ?DEFAULT_CHARACTER_SET,
     {State, [<<CharacterSet>>|Data]}.
 
 hsr_reserved(State, Data) ->
