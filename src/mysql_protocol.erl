@@ -270,7 +270,9 @@ handshake_salt(
      auth_plugin_name= <<"mysql_native_password">>,
      auth_plugin_data_1=SaltLow,
      auth_plugin_data_2=SaltHigh}) ->
-    <<SaltLow/binary, SaltHigh/binary>>.
+    <<SaltLow/binary, SaltHigh/binary>>;
+handshake_salt(#handshake{auth_plugin_name= <<>>}) ->
+    <<>>.
 
 secure_password(_, <<>>) -> <<>>;
 secure_password(Salt, Pwd) ->
