@@ -207,7 +207,7 @@ hs_auth_plugin_data_len(<<Len, _:10/binary, Rest/binary>>, HS) ->
 hs_auth_plugin_data_2(Data, #handshake{auth_plugin_data_len=Len}=HS) ->
     PartLen = max(13, Len - 8),
     <<PluginData:PartLen/binary, Rest/binary>> = Data,
-    {Rest, HS#handshake{auth_plugin_data_2=strip_null(PluginData)}}.
+    {Rest, HS#handshake{auth_plugin_data_2=PluginData}}.
 
 hs_auth_plugin_name(Data, HS) ->
     %% Plugin name may not be null terminated - see
@@ -623,10 +623,6 @@ encode_timestamp_param(TS) ->
 asciiz(Data) ->
     [Str, Rest] = binary:split(Data, <<0>>),
     {Str, Rest}.
-
-strip_null(Str) ->
-    [Stripped, <<>>] = binary:split(Str, <<0>>),
-    Stripped.
 
 maybe_strip_null(Str) ->
     case binary:split(Str, <<0>>) of
