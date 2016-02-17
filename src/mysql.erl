@@ -100,6 +100,7 @@ execute(#mysql{lib=Lib, sock=Sock}, Stmt, Params) ->
 select(Db, Query) ->
     case execute(Db, Query) of
         {ok, #resultset{rows=Rows}} -> {ok, Rows};
+        {ok, #ok_packet{}} -> {ok, []};
         {error, Err} -> {error, Err}
     end.
 
